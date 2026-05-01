@@ -1,0 +1,5 @@
+<Solution>
+  <Project Path="RagServer.API.Tests/RagServer.API.Tests.csproj" />
+  <Project Path="RagServer.API/RagServer.API.csproj" />
+  <Project Path="RagServer.Web/RagServer.Web.csproj" />
+</Solution>

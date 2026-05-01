@@ -1,0 +1,24 @@
+@RagServer.Api_HostAddress = http://localhost:5228
+
+### Ingest files from the configured KnowledgeBasePath
+POST {{RagServer.Api_HostAddress}}/ingest
+Accept: application/json
+
+###
+
+### Ask a question using retrieved context + Ollama generation
+POST {{RagServer.Api_HostAddress}}/ask
+Content-Type: application/json
+Accept: application/json
+
+{
+  "query": "What are the main responsibilities of this API?"
+}
+
+###
+
+### Clear all indexed RAG data
+DELETE {{RagServer.Api_HostAddress}}/data
+Accept: application/json
+
+###

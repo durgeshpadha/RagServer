@@ -1,0 +1,241 @@
+@page "/"
+@inject RagApiClient ApiClient
+@implements IDisposable
+
+<PageTitle>RAG Workbench</PageTitle>
+
+<div class="workspace-grid">
+    <section class="panel chat-panel">
+        <div class="panel-head">
+            <h2>Ask</h2>
+            <p>Chat with your indexed knowledge base.</p>
+        </div>
+
+        <div class="chat-stream">
+            @if (_messages.Count == 0)
+            {
+                <div class="empty-state">
+                    <h3>Start a conversation</h3>
+                    <p>Ask a question about your codebase or documents after ingestion.</p>
+                </div>
+            }
+
+            @foreach (var message in _messages)
+            {
+                <article class="msg @(message.IsUser ? "msg-user" : "msg-ai")">
+                    <div class="msg-role">@(message.IsUser ? "You" : "RAG")</div>
+                    <p>@message.Text</p>
+                    @if (!message.IsUser && message.Citations.Count > 0)
+                    {
+                        <details class="citations">
+                            <summary>Citations (@message.Citations.Count)</summary>
+                            <ul>
+                                @foreach (var cite in message.Citations)
+                                {
+                                    <li><code>@cite.Source</code> chunk <strong>@cite.ChunkIndex</strong></li>
+                                }
+                            </ul>
+                        </details>
+                    }
+                </article>
+            }
+
+            @if (_isAsking)
+            {
+                <article class="msg msg-ai loader-msg">
+                    <div class="msg-role">RAG</div>
+                    <div class="typing">
+                        <span></span><span></span><span></span>
+                    </div>
+                </article>
+            }
+        </div>
+
+        <form class="chat-form" @onsubmit="HandleAskAsync">
+            <textarea rows="2" placeholder="Ask anything about your indexed files..." @bind="_query" disabled="@_isAsking"></textarea>
+            <button type="submit" disabled="@(_isAsking || string.IsNullOrWhiteSpace(_query))">@(_isAsking ? "Thinking..." : "Send")</button>
+        </form>
+    </section>
+
+    <section class="panel action-panel">
+        <div class="panel-head">
+            <h2>Data & Ingest</h2>
+            <p>Control indexing and storage lifecycle.</p>
+        </div>
+
+        <div class="card-stack">
+            <article class="action-card">
+                <h3>Vector Store</h3>
+                <p class="stat">@(_dataCount.HasValue ? _dataCount.Value.ToString() : "-")</p>
+                <p class="helper">Stored chunks currently in RAG.</p>
+                <div class="actions-row">
+                    <button @onclick="RefreshCountAsync" disabled="@_isCountBusy">@(_isCountBusy ? "Loading..." : "Refresh Count")</button>
+                    <button class="danger" @onclick="ClearDataAsync" disabled="@_isClearBusy">@(_isClearBusy ? "Clearing..." : "Clear Data")</button>
+                </div>
+            </article>
+
+            <article class="action-card">
+                <h3>Ingest Knowledge Base</h3>
+                <p class="helper">Reads files, creates embeddings, and stores vectors.</p>
+                <button @onclick="RunIngestAsync" disabled="@_isIngesting">@(_isIngesting ? "Ingesting..." : "Run Ingest")</button>
+
+                @if (_lastIngest is not null)
+                {
+                    <dl class="ingest-summary">
+                        <div><dt>Scanned</dt><dd>@_lastIngest.FilesScanned</dd></div>
+                        <div><dt>Indexed</dt><dd>@_lastIngest.FilesIndexed</dd></div>
+                        <div><dt>Chunks</dt><dd>@_lastIngest.ChunksAdded</dd></div>
+                        <div><dt>Stored</dt><dd>@_lastIngest.TotalStored</dd></div>
+                        <div><dt>Failures</dt><dd>@_lastIngest.Failures.Count</dd></div>
+                        <div><dt>Duration</dt><dd>@_lastIngest.DurationMs ms</dd></div>
+                    </dl>
+                }
+            </article>
+
+            @if (!string.IsNullOrWhiteSpace(_statusMessage))
+            {
+                <article class="status-banner @(_isError ? "error" : "ok")">@_statusMessage</article>
+            }
+        </div>
+    </section>
+</div>
+
+@code {
+    private readonly List<ChatMessage> _messages = new();
+    private string _query = string.Empty;
+    private string _statusMessage = string.Empty;
+    private bool _isError;
+    private bool _isAsking;
+    private bool _isIngesting;
+    private bool _isCountBusy;
+    private bool _isClearBusy;
+    private int? _dataCount;
+    private IngestResponse? _lastIngest;
+    private readonly CancellationTokenSource _lifetimeCts = new();
+
+    protected override async Task OnInitializedAsync()
+    {
+        await RefreshCountAsync();
+    }
+
+    private async Task HandleAskAsync()
+    {
+        if (_isAsking || string.IsNullOrWhiteSpace(_query))
+        {
+            return;
+        }
+
+        var userText = _query.Trim();
+        _query = string.Empty;
+        _messages.Add(new ChatMessage(true, userText));
+        _isAsking = true;
+        _isError = false;
+        _statusMessage = string.Empty;
+
+        try
+        {
+            var result = await ApiClient.AskAsync(userText, _lifetimeCts.Token);
+            _messages.Add(new ChatMessage(false, result.Answer, result.Citations));
+        }
+        catch (Exception ex)
+        {
+            _isError = true;
+            _statusMessage = ex.Message;
+        }
+        finally
+        {
+            _isAsking = false;
+        }
+    }
+
+    private async Task RunIngestAsync()
+    {
+        if (_isIngesting)
+        {
+            return;
+        }
+
+        _isIngesting = true;
+        _isError = false;
+        _statusMessage = string.Empty;
+
+        try
+        {
+            _lastIngest = await ApiClient.IngestAsync(_lifetimeCts.Token);
+            _statusMessage = _lastIngest.Message;
+            await RefreshCountAsync();
+        }
+        catch (Exception ex)
+        {
+            _isError = true;
+            _statusMessage = ex.Message;
+        }
+        finally
+        {
+            _isIngesting = false;
+        }
+    }
+
+    private async Task RefreshCountAsync()
+    {
+        if (_isCountBusy)
+        {
+            return;
+        }
+
+        _isCountBusy = true;
+
+        try
+        {
+            _dataCount = await ApiClient.GetDataCountAsync(_lifetimeCts.Token);
+        }
+        catch (Exception ex)
+        {
+            _isError = true;
+            _statusMessage = ex.Message;
+        }
+        finally
+        {
+            _isCountBusy = false;
+        }
+    }
+
+    private async Task ClearDataAsync()
+    {
+        if (_isClearBusy)
+        {
+            return;
+        }
+
+        _isClearBusy = true;
+        _isError = false;
+        _statusMessage = string.Empty;
+
+        try
+        {
+            var response = await ApiClient.ClearDataAsync(_lifetimeCts.Token);
+            _statusMessage = $"{response.Message} Removed: {response.Removed}";
+            _dataCount = 0;
+        }
+        catch (Exception ex)
+        {
+            _isError = true;
+            _statusMessage = ex.Message;
+        }
+        finally
+        {
+            _isClearBusy = false;
+        }
+    }
+
+    public void Dispose()
+    {
+        _lifetimeCts.Cancel();
+        _lifetimeCts.Dispose();
+    }
+
+    private sealed record ChatMessage(bool IsUser, string Text, IReadOnlyList<Citation>? Citations = null)
+    {
+        public IReadOnlyList<Citation> Citations { get; } = Citations ?? Array.Empty<Citation>();
+    }
+}

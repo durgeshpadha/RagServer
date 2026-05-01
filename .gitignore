@@ -1,0 +1,10 @@
+﻿################################################################################
+# This .gitignore file was automatically created by Microsoft(R) Visual Studio.
+################################################################################
+
+/RagServer/.vs
+/RagServer/RagServer.API.Tests/bin/Debug/net10.0
+/RagServer/RagServer.API.Tests/obj
+/RagServer/RagServer.Web/obj
+/RagServer/RagServer.Web/bin/Debug/net10.0
+/RagServer/RagServer.Web/RagServer.Web.csproj.user
