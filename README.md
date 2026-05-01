@@ -13,6 +13,40 @@ RagServer is a .NET 10 solution with:
 - `RagServer.Web/` - Blazor standalone UI (chatbot + ingest + data controls)
 - `RagServer.slnx` - solution file
 
+## Recreate `RAG-KnowledgeBase` Repos
+
+Use this PowerShell script to recreate the same nested folder structure and clone all repos into `RAG-KnowledgeBase`:
+
+```powershell
+$root = "RAG-KnowledgeBase"
+
+$repos = @(
+    @{ Path = "dotnet\api\dotnet-api-docs"; Url = "https://github.com/dotnet/dotnet-api-docs" },
+    @{ Path = "dotnet\aspnetcore\AspNetCore.Docs"; Url = "https://github.com/dotnet/AspNetCore.Docs" },
+    @{ Path = "dotnet\core"; Url = "https://github.com/dotnet/core" },
+    @{ Path = "dotnet\csharp\csharplang"; Url = "https://github.com/dotnet/csharplang" },
+    @{ Path = "dotnet\efcore\EntityFramework.Docs"; Url = "https://github.com/dotnet/EntityFramework.Docs" },
+    @{ Path = "javascript\jquery\api.jquery.com\jquery"; Url = "https://github.com/jquery/jquery" },
+    @{ Path = "javascript\mdn\content"; Url = "https://github.com/mdn/content" },
+    @{ Path = "react\react.dev"; Url = "https://github.com/reactjs/react.dev" }
+)
+
+New-Item -ItemType Directory -Force -Path $root | Out-Null
+
+foreach ($repo in $repos) {
+    $target = Join-Path $root $repo.Path
+    $parent = Split-Path -Parent $target
+    New-Item -ItemType Directory -Force -Path $parent | Out-Null
+
+    if (-not (Test-Path $target)) {
+        git clone $repo.Url $target
+    }
+    else {
+        Write-Host "Skipping existing repo: $target"
+    }
+}
+```
+
 ## Prerequisites
 
 - .NET SDK 10
