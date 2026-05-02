@@ -7,11 +7,11 @@ using System.Runtime.CompilerServices;
 public class RagEngine
 {
     private readonly EmbeddingService _embed;
-    private readonly VectorStore _store;
+    private readonly IVectorStore _store;
     private readonly HttpClient _http;
     private readonly RagOptions _options;
 
-    public RagEngine(EmbeddingService embed, VectorStore store, HttpClient http, IOptions<RagOptions> options)
+    public RagEngine(EmbeddingService embed, IVectorStore store, HttpClient http, IOptions<RagOptions> options)
     {
         _embed = embed;
         _store = store;
@@ -47,8 +47,8 @@ public class RagEngine
         }
 
         var queryEmbedding = await _embed.EmbedAsync(normalizedQuery, ct);
-        var docs = _store.Query(queryEmbedding, _options.TopK);
-        if (docs.Count == 0)
+        var scored = await _store.QueryAsync(queryEmbedding, _options.TopK, ct);
+        if (scored.Count == 0)
         {
             return new AskPreparation(
                 Prompt: string.Empty,
@@ -58,6 +58,7 @@ public class RagEngine
                 Array.Empty<Citation>()));
         }
 
+        var docs = scored.Select(s => s.Document).ToArray();
         var context = BuildBoundedContext(docs, _options.MaxContextChars);
 
         var historySection = BuildHistorySection(history);

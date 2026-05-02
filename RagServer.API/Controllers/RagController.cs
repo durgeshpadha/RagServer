@@ -2,6 +2,7 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Options;
 using System.Collections.Concurrent;
 using System.Diagnostics;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 
@@ -13,17 +14,16 @@ public class RagController : ControllerBase
 {
     private const int MaxHistoryItems = 10;
     private readonly EmbeddingService _embeddingService;
-    private readonly VectorStore _vectorStore;
+    private readonly IVectorStore _vectorStore;
     private readonly RagEngine _ragEngine;
     private readonly IngestOperationRegistry _ingestRegistry;
     private readonly IOptions<RagOptions> _options;
     private readonly IWebHostEnvironment _environment;
     private readonly ILogger<RagController> _logger;
-    private readonly Lock _vectorStoreMutationLock = new();
 
     public RagController(
         EmbeddingService embeddingService,
-        VectorStore vectorStore,
+        IVectorStore vectorStore,
         RagEngine ragEngine,
         IngestOperationRegistry ingestRegistry,
         IOptions<RagOptions> options,
@@ -384,10 +384,9 @@ public class RagController : ControllerBase
     /// <returns>Count of removed records.</returns>
     /// <response code="200">Vector store cleared successfully.</response>
     [HttpDelete("data")]
-    public IActionResult ClearData()
+    public async Task<IActionResult> ClearData(CancellationToken ct)
     {
-        var removed = _vectorStore.Clear();
-        _vectorStore.Save();
+        var removed = await _vectorStore.ClearAsync(ct);
         return Ok(new { message = "RAG data cleared.", removed });
     }
 
@@ -397,9 +396,10 @@ public class RagController : ControllerBase
     /// <returns>Total stored record count.</returns>
     /// <response code="200">Current record count returned.</response>
     [HttpGet("data/count")]
-    public IActionResult GetDataCount()
+    public async Task<IActionResult> GetDataCount(CancellationToken ct)
     {
-        return Ok(new { totalStored = _vectorStore.Documents.Count });
+        var totalStored = await _vectorStore.CountAsync(ct);
+        return Ok(new { totalStored });
     }
 
     private static string GetSafeFileDisplay(string root, string path)
@@ -482,7 +482,6 @@ public class RagController : ControllerBase
         var sw = Stopwatch.StartNew();
         var ragOptions = _options.Value;
         var maxParallelFiles = ClampConcurrency(ragOptions.IngestMaxParallelFiles, defaultValue: 2);
-        var maxParallelEmbeddingsPerFile = ClampConcurrency(ragOptions.IngestMaxParallelEmbeddingsPerFile, defaultValue: 2);
 
         var allowedExtensions = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
         {
@@ -530,7 +529,6 @@ public class RagController : ControllerBase
                     file,
                     root,
                     ragOptions,
-                    maxParallelEmbeddingsPerFile,
                     token);
 
                 if (fileResult.Indexed)
@@ -560,8 +558,9 @@ public class RagController : ControllerBase
                 }
             });
 
-        _vectorStore.Save();
         sw.Stop();
+
+        var totalStored = await _vectorStore.CountAsync(ct);
 
         return new IngestResponse(
             "Ingestion complete",
@@ -569,7 +568,7 @@ public class RagController : ControllerBase
             indexedFiles,
             chunksAdded,
             failures.ToArray(),
-            _vectorStore.Documents.Count,
+            (int)Math.Min(int.MaxValue, totalStored),
             sw.ElapsedMilliseconds);
     }
 
@@ -577,7 +576,6 @@ public class RagController : ControllerBase
         string file,
         string root,
         RagOptions ragOptions,
-        int maxParallelEmbeddingsPerFile,
         CancellationToken ct)
     {
         ct.ThrowIfCancellationRequested();
@@ -613,55 +611,56 @@ public class RagController : ControllerBase
                 return new IngestFileResult(displayFile, "skipped", Indexed: false, ChunksAdded: 0, Failure: null);
             }
 
-            var newRecords = new ConcurrentBag<DocumentRecord>();
-            using var semaphore = new SemaphoreSlim(maxParallelEmbeddingsPerFile);
-            var embeddingTasks = new List<Task>();
+            var collection = _vectorStore.ResolveCollection(root, file);
+            await _vectorStore.DeleteBySourceAsync(collection, file, ct);
+
+            var batchSize = Math.Clamp(ragOptions.QdrantUpsertBatchSize, 1, 256);
+            var batch = new List<DocumentRecord>(batchSize);
             var chunkIndex = 0;
+            var chunksAdded = 0;
 
             foreach (var chunk in SplitIntoChunks(text, ragOptions.ChunkSizeChars, ragOptions.ChunkOverlapChars))
             {
-                var localChunkIndex = chunkIndex;
-                var localChunk = chunk;
-                chunkIndex++;
-
-                var normalizedChunk = EmbeddingService.NormalizeForEmbedding(localChunk);
+                ct.ThrowIfCancellationRequested();
+                var normalizedChunk = EmbeddingService.NormalizeForEmbedding(chunk);
                 if (string.IsNullOrWhiteSpace(normalizedChunk))
                 {
+                    chunkIndex++;
                     continue;
                 }
 
-                embeddingTasks.Add(Task.Run(async () =>
+                var embedding = await _embeddingService.EmbedAsync(normalizedChunk, ct);
+                batch.Add(new DocumentRecord
                 {
-                    await semaphore.WaitAsync(ct);
-                    try
-                    {
-                        var embedding = await _embeddingService.EmbedAsync(normalizedChunk, ct);
-                        newRecords.Add(new DocumentRecord
-                        {
-                            Id = $"{file}::chunk-{localChunkIndex}",
-                            Source = file,
-                            ChunkIndex = localChunkIndex,
-                            Text = localChunk,
-                            Embedding = embedding
-                        });
-                    }
-                    finally
-                    {
-                        semaphore.Release();
-                    }
-                }, ct));
+                    Id = BuildPointId(file, chunkIndex),
+                    Source = file,
+                    ChunkIndex = chunkIndex,
+                    Text = chunk,
+                    Embedding = embedding
+                });
+
+                chunkIndex++;
+
+                if (batch.Count >= batchSize)
+                {
+                    await _vectorStore.UpsertAsync(collection, batch, ct);
+                    chunksAdded += batch.Count;
+                    batch.Clear();
+                }
             }
 
-            await Task.WhenAll(embeddingTasks);
-
-            var orderedRecords = newRecords.OrderBy(r => r.ChunkIndex).ToArray();
-            lock (_vectorStoreMutationLock)
+            if (batch.Count > 0)
             {
-                _vectorStore.RemoveBySource(file);
-                _vectorStore.AddRange(orderedRecords);
+                await _vectorStore.UpsertAsync(collection, batch, ct);
+                chunksAdded += batch.Count;
             }
 
-            return new IngestFileResult(displayFile, status, Indexed: true, ChunksAdded: orderedRecords.Length, Failure: null);
+            if (chunksAdded == 0)
+            {
+                return new IngestFileResult(displayFile, "skipped", Indexed: false, ChunksAdded: 0, Failure: null);
+            }
+
+            return new IngestFileResult(displayFile, status, Indexed: true, ChunksAdded: chunksAdded, Failure: null);
         }
         catch (OperationCanceledException)
         {
@@ -693,6 +692,13 @@ public class RagController : ControllerBase
     {
         var value = configuredValue <= 0 ? defaultValue : configuredValue;
         return Math.Clamp(value, 1, 8);
+    }
+
+    private static string BuildPointId(string source, int chunkIndex)
+    {
+        var input = $"{source}::chunk-{chunkIndex}";
+        var hash = MD5.HashData(Encoding.UTF8.GetBytes(input));
+        return new Guid(hash).ToString("D");
     }
 
     private async Task WriteSseEventAsync(string eventName, IngestProgressEvent payload, CancellationToken ct)

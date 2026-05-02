@@ -42,6 +42,12 @@ public class RagOptions
     public const string SectionName = "Rag";
     public string KnowledgeBasePath { get; set; } = "..\\RAG-KnowledgeBase";
     public string VectorStorePath { get; set; } = "..\\data\\vectors.json";
+    public string QdrantUrl { get; set; } = "http://localhost:6333";
+    public string QdrantCollectionPrefix { get; set; } = "rag_";
+    public string[] CollectionBuckets { get; set; } = new[] { "dotnet", "javascript", "react" };
+    public string QdrantDistance { get; set; } = "Cosine";
+    public int QdrantUpsertBatchSize { get; set; } = 64;
+    public int QdrantTimeoutSeconds { get; set; } = 30;
     public string OllamaBaseUrl { get; set; } = "http://localhost:11434";
     public string EmbeddingModel { get; set; } = "nomic-embed-text";
     public string GenerationModel { get; set; } = "deepseek-coder-v2";

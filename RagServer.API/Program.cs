@@ -65,12 +65,24 @@ builder.Services.AddHttpClient("ollama-generate", http =>
 {
     http.Timeout = TimeSpan.FromSeconds(60);
 });
-builder.Services.AddSingleton<VectorStore>();
+builder.Services.AddHttpClient("qdrant", (sp, http) =>
+{
+    var options = sp.GetRequiredService<IOptions<RagOptions>>().Value;
+    http.BaseAddress = new Uri(options.QdrantUrl.TrimEnd('/'));
+    http.Timeout = TimeSpan.FromSeconds(Math.Max(1, options.QdrantTimeoutSeconds));
+});
+builder.Services.AddSingleton<IVectorStore>(sp =>
+{
+    var http = sp.GetRequiredService<IHttpClientFactory>().CreateClient("qdrant");
+    var options = sp.GetRequiredService<IOptions<RagOptions>>();
+    var logger = sp.GetRequiredService<ILogger<QdrantVectorStore>>();
+    return new QdrantVectorStore(http, options, logger);
+});
 builder.Services.AddSingleton<IngestOperationRegistry>();
 builder.Services.AddSingleton<RagEngine>(sp =>
 {
     var embed = sp.GetRequiredService<EmbeddingService>();
-    var store = sp.GetRequiredService<VectorStore>();
+    var store = sp.GetRequiredService<IVectorStore>();
     var http = sp.GetRequiredService<IHttpClientFactory>().CreateClient("ollama-generate");
     var options = sp.GetRequiredService<IOptions<RagOptions>>();
     return new RagEngine(embed, store, http, options);

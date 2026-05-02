@@ -27,7 +27,13 @@ Minimal-dependency RAG API in C# using local files + Ollama.
 `Rag` section:
 
 - `KnowledgeBasePath`: source folder for ingestion.
-- `VectorStorePath`: JSON file path for persisted vectors.
+- `QdrantUrl`: Qdrant base URL (default `http://localhost:6333`).
+- `QdrantCollectionPrefix`: prefix used for folder-wise collections (`rag_` by default).
+- `CollectionBuckets`: top-level folder buckets mapped to collections (`dotnet`, `javascript`, `react`).
+- `QdrantDistance`: vector distance metric for created collections (`Cosine` by default).
+- `QdrantUpsertBatchSize`: chunk batch size for upserts.
+- `QdrantTimeoutSeconds`: timeout for Qdrant requests.
+- `VectorStorePath`: legacy JSON path (kept for backward compatibility; not used in Qdrant mode).
 - `OllamaBaseUrl`: Ollama base URL.
 - `EmbeddingModel`: model used for embeddings.
 - `GenerationModel`: default model used for answers (fallback/backward compatibility).

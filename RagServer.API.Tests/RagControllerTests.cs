@@ -370,17 +370,23 @@ public class RagControllerTests
         var handler = new TrackingOllamaHandler();
         var httpClient = new HttpClient(handler);
         var embeddingService = new EmbeddingService(httpClient, optionsWrapper);
-        var vectorStore = new VectorStore(env, optionsWrapper, NullLogger<VectorStore>.Instance);
+        var vectorStore = new InMemoryVectorStore(options);
         if (addKnowledgeBaseDocument)
         {
-            vectorStore.Add(new DocumentRecord
-            {
-                Id = "seed-1",
-                Source = Path.Combine(kbPath, "sample.txt"),
-                ChunkIndex = 0,
-                Text = "This is a sample knowledge base document.",
-                Embedding = new[] { 0.1f, 0.2f, 0.3f }
-            });
+            vectorStore.UpsertAsync(
+                vectorStore.ResolveCollection(kbPath, Path.Combine(kbPath, "sample.txt")),
+                new[]
+                {
+                    new DocumentRecord
+                    {
+                        Id = "seed-1",
+                        Source = Path.Combine(kbPath, "sample.txt"),
+                        ChunkIndex = 0,
+                        Text = "This is a sample knowledge base document.",
+                        Embedding = new[] { 0.1f, 0.2f, 0.3f }
+                    }
+                },
+                CancellationToken.None).GetAwaiter().GetResult();
         }
         var ragEngine = new RagEngine(embeddingService, vectorStore, httpClient, optionsWrapper);
         var registry = new IngestOperationRegistry();
@@ -490,6 +496,121 @@ public class RagControllerTests
             }
 
             return new HttpResponseMessage(HttpStatusCode.NotFound);
+        }
+    }
+
+    private sealed class InMemoryVectorStore : IVectorStore
+    {
+        private readonly RagOptions _options;
+        private readonly List<(string Collection, DocumentRecord Record)> _records = new();
+        private readonly Lock _lock = new();
+
+        public InMemoryVectorStore(RagOptions options)
+        {
+            _options = options;
+            ManagedCollections = options.CollectionBuckets
+                .Concat(new[] { CollectionBucketResolver.DefaultMiscBucket })
+                .Select(bucket => CollectionBucketResolver.BuildCollectionName(options.QdrantCollectionPrefix, bucket))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+        }
+
+        public IReadOnlyList<string> ManagedCollections { get; }
+
+        public string ResolveCollection(string rootPath, string sourcePath)
+        {
+            var bucket = CollectionBucketResolver.ResolveBucket(rootPath, sourcePath, _options.CollectionBuckets);
+            return CollectionBucketResolver.BuildCollectionName(_options.QdrantCollectionPrefix, bucket);
+        }
+
+        public Task DeleteBySourceAsync(string collection, string source, CancellationToken ct = default)
+        {
+            lock (_lock)
+            {
+                _records.RemoveAll(r =>
+                    string.Equals(r.Collection, collection, StringComparison.OrdinalIgnoreCase) &&
+                    string.Equals(r.Record.Source, source, StringComparison.OrdinalIgnoreCase));
+            }
+
+            return Task.CompletedTask;
+        }
+
+        public Task UpsertAsync(string collection, IReadOnlyList<DocumentRecord> records, CancellationToken ct = default)
+        {
+            lock (_lock)
+            {
+                foreach (var record in records)
+                {
+                    _records.RemoveAll(r =>
+                        string.Equals(r.Collection, collection, StringComparison.OrdinalIgnoreCase) &&
+                        string.Equals(r.Record.Id, record.Id, StringComparison.OrdinalIgnoreCase));
+
+                    _records.Add((collection, record));
+                }
+            }
+
+            return Task.CompletedTask;
+        }
+
+        public Task<IReadOnlyList<ScoredDocumentRecord>> QueryAsync(float[] queryEmbedding, int topK, CancellationToken ct = default)
+        {
+            List<(string Collection, DocumentRecord Record)> snapshot;
+            lock (_lock)
+            {
+                snapshot = _records.ToList();
+            }
+
+            var scored = snapshot
+                .Select(item => new ScoredDocumentRecord(item.Record, CosineSimilarity(queryEmbedding, item.Record.Embedding), item.Collection))
+                .OrderByDescending(s => s.Score)
+                .Take(topK)
+                .ToArray();
+
+            return Task.FromResult<IReadOnlyList<ScoredDocumentRecord>>(scored);
+        }
+
+        public Task<long> CountAsync(CancellationToken ct = default)
+        {
+            lock (_lock)
+            {
+                return Task.FromResult((long)_records.Count);
+            }
+        }
+
+        public async Task<long> ClearAsync(CancellationToken ct = default)
+        {
+            var count = await CountAsync(ct);
+            lock (_lock)
+            {
+                _records.Clear();
+            }
+
+            return count;
+        }
+
+        private static float CosineSimilarity(float[] a, float[] b)
+        {
+            if (a.Length != b.Length || a.Length == 0)
+            {
+                return -1f;
+            }
+
+            double dot = 0;
+            double na = 0;
+            double nb = 0;
+            for (var i = 0; i < a.Length; i++)
+            {
+                dot += a[i] * b[i];
+                na += a[i] * a[i];
+                nb += b[i] * b[i];
+            }
+
+            if (na == 0 || nb == 0)
+            {
+                return 0f;
+            }
+
+            return (float)(dot / (Math.Sqrt(na) * Math.Sqrt(nb)));
         }
     }
 
