@@ -52,8 +52,24 @@
         </div>
 
         <form class="chat-form" @onsubmit="HandleAskAsync">
+            <div class="model-picker">
+                <label for="model-select">Model</label>
+                <select id="model-select" @bind="_selectedModel" disabled="@(_isAsking || _isModelsLoading || _availableModels.Count == 0)">
+                    @if (_availableModels.Count == 0)
+                    {
+                        <option value="">No models available</option>
+                    }
+                    else
+                    {
+                        @foreach (var model in _availableModels)
+                        {
+                            <option value="@model">@model</option>
+                        }
+                    }
+                </select>
+            </div>
             <textarea rows="2" placeholder="Ask anything about your indexed files..." @bind="_query" disabled="@_isAsking"></textarea>
-            <button type="submit" disabled="@(_isAsking || string.IsNullOrWhiteSpace(_query))">@(_isAsking ? "Thinking..." : "Send")</button>
+            <button type="submit" disabled="@(_isAsking || _isModelsLoading || _availableModels.Count == 0 || string.IsNullOrWhiteSpace(_query))">@(_isAsking ? "Thinking..." : "Send")</button>
         </form>
     </section>
 
@@ -106,15 +122,19 @@
     private string _statusMessage = string.Empty;
     private bool _isError;
     private bool _isAsking;
+    private bool _isModelsLoading;
     private bool _isIngesting;
     private bool _isCountBusy;
     private bool _isClearBusy;
     private int? _dataCount;
     private IngestResponse? _lastIngest;
+    private List<string> _availableModels = new();
+    private string _selectedModel = string.Empty;
     private readonly CancellationTokenSource _lifetimeCts = new();
 
     protected override async Task OnInitializedAsync()
     {
+        await LoadModelsAsync();
         await RefreshCountAsync();
     }
 
@@ -134,7 +154,7 @@
 
         try
         {
-            var result = await ApiClient.AskAsync(userText, _lifetimeCts.Token);
+            var result = await ApiClient.AskAsync(userText, _selectedModel, _lifetimeCts.Token);
             _messages.Add(new ChatMessage(false, result.Answer, result.Citations));
         }
         catch (Exception ex)
@@ -145,6 +165,42 @@
         finally
         {
             _isAsking = false;
+        }
+    }
+
+    private async Task LoadModelsAsync()
+    {
+        _isModelsLoading = true;
+
+        try
+        {
+            var models = await ApiClient.GetModelsAsync(_lifetimeCts.Token);
+            _availableModels = models.Models
+                .Where(m => !string.IsNullOrWhiteSpace(m))
+                .Select(m => m.Trim())
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+
+            if (_availableModels.Count == 0)
+            {
+                _isError = true;
+                _statusMessage = "No chat models are configured in the API.";
+                _selectedModel = string.Empty;
+                return;
+            }
+
+            var defaultModel = models.DefaultModel?.Trim() ?? string.Empty;
+            _selectedModel = _availableModels.FirstOrDefault(m => string.Equals(m, defaultModel, StringComparison.OrdinalIgnoreCase))
+                ?? _availableModels[0];
+        }
+        catch (Exception ex)
+        {
+            _isError = true;
+            _statusMessage = ex.Message;
+        }
+        finally
+        {
+            _isModelsLoading = false;
         }
     }
 

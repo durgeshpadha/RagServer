@@ -13,9 +13,9 @@ public sealed class RagApiClient
         _httpClient = httpClient;
     }
 
-    public async Task<AskResponse> AskAsync(string query, CancellationToken ct)
+    public async Task<AskResponse> AskAsync(string query, string? model, CancellationToken ct)
     {
-        var response = await _httpClient.PostAsJsonAsync("ask", new AskRequest(query), ct);
+        var response = await _httpClient.PostAsJsonAsync("ask", new AskRequest(query, model), ct);
         if (!response.IsSuccessStatusCode)
         {
             throw await CreateApiExceptionAsync(response, ct);
@@ -31,6 +31,23 @@ public sealed class RagApiClient
             ?? new List<Citation>();
 
         return new AskResponse(content.Answer ?? string.Empty, citations);
+    }
+
+    public async Task<ModelsResponse> GetModelsAsync(CancellationToken ct)
+    {
+        var response = await _httpClient.GetAsync("models", ct);
+        if (!response.IsSuccessStatusCode)
+        {
+            throw await CreateApiExceptionAsync(response, ct);
+        }
+
+        var payload = await response.Content.ReadFromJsonAsync<ModelsResponse>(cancellationToken: ct);
+        if (payload is null)
+        {
+            throw new InvalidOperationException("API returned an empty models response.");
+        }
+
+        return payload;
     }
 
     public async Task<IngestResponse> IngestAsync(CancellationToken ct)

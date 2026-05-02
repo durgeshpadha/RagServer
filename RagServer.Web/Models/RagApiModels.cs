@@ -1,6 +1,6 @@
 namespace RagServer.Web.Models;
 
-public sealed record AskRequest(string Query);
+public sealed record AskRequest(string Query, string? Model = null);
 
 public sealed record AskResponse(string Answer, IReadOnlyList<Citation> Citations);
 
@@ -22,3 +22,5 @@ public sealed record ErrorResponse(string Code, string Message);
 public sealed record DataCountResponse(int TotalStored);
 
 public sealed record ClearDataResponse(string Message, int Removed);
+
+public sealed record ModelsResponse(string DefaultModel, IReadOnlyList<string> Models);

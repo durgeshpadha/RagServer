@@ -18,7 +18,7 @@ public class RagEngine
         _options = options.Value;
     }
 
-    public async Task<AskResult> AskAsync(string query, CancellationToken ct = default)
+    public async Task<AskResult> AskAsync(string query, string generationModel, CancellationToken ct = default)
     {
         var normalizedQuery = EmbeddingService.NormalizeForEmbedding(query);
         if (string.IsNullOrWhiteSpace(normalizedQuery))
@@ -59,7 +59,7 @@ Answer:
         {
             response = await _http.PostAsJsonAsync($"{_options.OllamaBaseUrl.TrimEnd('/')}/api/generate", new
             {
-                model = _options.GenerationModel,
+                model = generationModel,
                 prompt,
                 stream = false
             }, ct);

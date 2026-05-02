@@ -2,8 +2,53 @@ using Microsoft.Extensions.Options;
 using System.Reflection;
 
 var builder = WebApplication.CreateBuilder(args);
+const string CorsPolicyName = "RagServerWebCors";
+
+var configuredCorsOrigins = builder.Configuration.GetSection("Cors:AllowedOrigins").Get<string[]>();
+var allowedCorsOrigins = (configuredCorsOrigins is { Length: > 0 }
+        ? configuredCorsOrigins
+        : new[]
+        {
+            "http://localhost:5121",
+            "https://localhost:7224"
+        })
+    .Where(origin => !string.IsNullOrWhiteSpace(origin))
+    .Distinct(StringComparer.OrdinalIgnoreCase)
+    .ToArray();
 
 builder.Services.AddControllers();
+builder.Services.AddCors(options =>
+{
+    options.AddPolicy(CorsPolicyName, policy =>
+    {
+        policy
+            .SetIsOriginAllowed(origin =>
+            {
+                if (string.IsNullOrWhiteSpace(origin))
+                {
+                    return false;
+                }
+
+                // Allow explicit configured origins first.
+                if (allowedCorsOrigins.Contains(origin, StringComparer.OrdinalIgnoreCase))
+                {
+                    return true;
+                }
+
+                // Dev-friendly fallback: allow any localhost/loopback origin regardless of port.
+                if (!Uri.TryCreate(origin, UriKind.Absolute, out var uri))
+                {
+                    return false;
+                }
+
+                return uri.IsLoopback
+                    || string.Equals(uri.Host, "localhost", StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(uri.Host, "127.0.0.1", StringComparison.OrdinalIgnoreCase);
+            })
+            .AllowAnyHeader()
+            .AllowAnyMethod();
+    });
+});
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen(options =>
 {
@@ -49,6 +94,7 @@ app.UseExceptionHandler(handler =>
     });
 });
 
+app.UseCors(CorsPolicyName);
 app.MapControllers();
 app.UseSwagger();
 app.UseSwaggerUI(options =>

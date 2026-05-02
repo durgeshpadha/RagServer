@@ -1,4 +1,4 @@
-public record AskRequest(string Query);
+public record AskRequest(string Query, string? Model = null);
 
 public record IngestFailure(string File, string ErrorCode, string Message);
 
@@ -21,6 +21,7 @@ public class RagOptions
     public string OllamaBaseUrl { get; set; } = "http://localhost:11434";
     public string EmbeddingModel { get; set; } = "nomic-embed-text";
     public string GenerationModel { get; set; } = "deepseek-coder-v2";
+    public string[] GenerationModels { get; set; } = Array.Empty<string>();
     public int MaxQueryChars { get; set; } = 4000;
     public int TopK { get; set; } = 5;
     public int MaxContextChars { get; set; } = 8000;

@@ -174,9 +174,21 @@ public class RagController : ControllerBase
             return BadRequest(new ErrorResponse("query_too_large", $"Query must be <= {ragOptions.MaxQueryChars} characters."));
         }
 
+        var availableModels = GetAvailableGenerationModels(ragOptions);
+        var requestedModel = req.Model?.Trim();
+        if (!string.IsNullOrWhiteSpace(requestedModel) &&
+            !availableModels.Contains(requestedModel, StringComparer.OrdinalIgnoreCase))
+        {
+            return BadRequest(new ErrorResponse("invalid_model", "Requested model is not in the configured model list."));
+        }
+
+        var selectedModel = string.IsNullOrWhiteSpace(requestedModel)
+            ? ResolveDefaultModel(ragOptions, availableModels)
+            : requestedModel!;
+
         try
         {
-            var result = await _ragEngine.AskAsync(req.Query, ct);
+            var result = await _ragEngine.AskAsync(req.Query, selectedModel, ct);
             return Ok(new { answer = result.Answer, citations = result.Citations });
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
@@ -198,6 +210,20 @@ public class RagController : ControllerBase
             _logger.LogWarning(ex, "Generation response invalid for /ask request.");
             return StatusCode(StatusCodes.Status502BadGateway);
         }
+    }
+
+    /// <summary>
+    /// Gets configured generation models and default model for chat selection.
+    /// </summary>
+    /// <returns>Default model and allowed model list.</returns>
+    /// <response code="200">Model configuration returned.</response>
+    [HttpGet("models")]
+    public IActionResult GetModels()
+    {
+        var ragOptions = _options.Value;
+        var availableModels = GetAvailableGenerationModels(ragOptions);
+        var defaultModel = ResolveDefaultModel(ragOptions, availableModels);
+        return Ok(new { defaultModel, models = availableModels });
     }
 
     /// <summary>
@@ -228,6 +254,40 @@ public class RagController : ControllerBase
     {
         var relative = Path.GetRelativePath(root, path);
         return string.IsNullOrWhiteSpace(relative) ? Path.GetFileName(path) : relative;
+    }
+
+    private static IReadOnlyList<string> GetAvailableGenerationModels(RagOptions options)
+    {
+        var configured = options.GenerationModels
+            ?.Where(m => !string.IsNullOrWhiteSpace(m))
+            .Select(m => m.Trim())
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList()
+            ?? new List<string>();
+
+        if (configured.Count == 0 && !string.IsNullOrWhiteSpace(options.GenerationModel))
+        {
+            configured.Add(options.GenerationModel.Trim());
+        }
+
+        return configured;
+    }
+
+    private static string ResolveDefaultModel(RagOptions options, IReadOnlyList<string> availableModels)
+    {
+        if (!string.IsNullOrWhiteSpace(options.GenerationModel))
+        {
+            var configuredDefault = options.GenerationModel.Trim();
+            var match = availableModels.FirstOrDefault(m => string.Equals(m, configuredDefault, StringComparison.OrdinalIgnoreCase));
+            if (!string.IsNullOrWhiteSpace(match))
+            {
+                return match;
+            }
+
+            return configuredDefault;
+        }
+
+        return availableModels.FirstOrDefault() ?? string.Empty;
     }
 
     private static IEnumerable<string> SplitIntoChunks(string text, int maxChars = 1000, int overlap = 200)

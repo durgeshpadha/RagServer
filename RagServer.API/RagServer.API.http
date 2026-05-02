@@ -12,8 +12,15 @@ Content-Type: application/json
 Accept: application/json
 
 {
-  "query": "What are the main responsibilities of this API?"
+  "query": "What are the main responsibilities of this API?",
+  "model": "qwen2.5-coder:14b"
 }
+
+###
+
+### Get configured chat models and default model
+GET {{RagServer.Api_HostAddress}}/models
+Accept: application/json
 
 ###
 
