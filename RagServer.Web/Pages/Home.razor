@@ -1,5 +1,6 @@
 @page "/"
 @inject RagApiClient ApiClient
+@inject MarkdownRenderer MarkdownRenderer
 @implements IDisposable
 
 <PageTitle>RAG Workbench</PageTitle>
@@ -24,7 +25,14 @@
             {
                 <article class="msg @(message.IsUser ? "msg-user" : "msg-ai")">
                     <div class="msg-role">@(message.IsUser ? "You" : "RAG")</div>
-                    <p>@message.Text</p>
+                    @if (message.IsUser)
+                    {
+                        <p class="msg-plain">@message.Text</p>
+                    }
+                    else
+                    {
+                        <div class="msg-markdown">@((MarkupString)MarkdownRenderer.ToHtml(message.Text))</div>
+                    }
                     @if (!message.IsUser && message.IsStopped && !_isAsking)
                     {
                         <button type="button" class="regen-btn" @onclick="() => RegenerateAsync(message)">Regenerate</button>

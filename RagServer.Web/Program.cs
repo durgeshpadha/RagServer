@@ -18,5 +18,6 @@ builder.Services.AddScoped(sp => new HttpClient
     BaseAddress = new Uri(apiBaseUrl)
 });
 builder.Services.AddScoped<RagApiClient>();
+builder.Services.AddSingleton<MarkdownRenderer>();
 
 await builder.Build().RunAsync();
