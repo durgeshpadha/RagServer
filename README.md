@@ -84,8 +84,11 @@ docker compose down
 
 Default models configured in `RagServer.API`:
 
-- Embedding model: `nomic-embed-text`
-- Generation model: `deepseek-coder-v2`
+- Embedding model: `nomic-embed-text:latest`
+- Generation model: `deepseek-coder-v2:16b`
+- Generation model: `qwen2.5-coder:14b`
+- Generation model: `gemma4:e2b`
+
 
 Pull them before running the API:
 
