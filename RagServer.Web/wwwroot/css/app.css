@@ -174,6 +174,27 @@ h1, h2, h3 {
     gap: 0.6rem;
 }
 
+.chat-actions {
+    display: inline-flex;
+    gap: 0.45rem;
+    align-items: center;
+}
+
+.stop-btn {
+    padding: 0.5rem 0.75rem;
+    font-size: 0.88rem;
+    background: #fff;
+    border-color: #cfd8e2;
+}
+
+.regen-btn {
+    margin-top: 0.5rem;
+    padding: 0.35rem 0.6rem;
+    font-size: 0.78rem;
+    background: #fff;
+    border-color: #cfd8e2;
+}
+
 .model-picker {
     grid-column: 1 / -1;
     display: grid;

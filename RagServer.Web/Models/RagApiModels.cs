@@ -40,3 +40,13 @@ public sealed record IngestProgressEvent(
     string? CurrentFile = null,
     IngestResponse? Summary = null,
     string? ErrorMessage = null);
+
+public sealed record AskStreamTokenEvent(string Text);
+public sealed record AskStreamCompletedEvent(string Answer, IReadOnlyList<Citation> Citations);
+public sealed record AskStreamErrorEvent(string Message, string? Code = null);
+
+public sealed record AskStreamEvent(
+    string EventType,
+    AskStreamTokenEvent? Token = null,
+    AskStreamCompletedEvent? Completed = null,
+    AskStreamErrorEvent? Error = null);

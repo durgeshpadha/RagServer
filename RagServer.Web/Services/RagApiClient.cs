@@ -41,6 +41,85 @@ public sealed class RagApiClient
         return new AskResponse(content.Answer ?? string.Empty, citations);
     }
 
+    public async IAsyncEnumerable<AskStreamEvent> StreamAskAsync(
+        string query,
+        string? model,
+        bool useKnowledgeBase,
+        IReadOnlyList<ChatTurn>? history,
+        [EnumeratorCancellation] CancellationToken ct)
+    {
+        using var request = new HttpRequestMessage(HttpMethod.Post, "ask/stream")
+        {
+            Content = JsonContent.Create(new AskRequest(query, model, useKnowledgeBase, history))
+        };
+
+        using var response = await _httpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct);
+        if (!response.IsSuccessStatusCode)
+        {
+            throw await CreateApiExceptionAsync(response, ct);
+        }
+
+        await using var stream = await response.Content.ReadAsStreamAsync(ct);
+        using var reader = new StreamReader(stream);
+
+        var eventName = string.Empty;
+        var dataBuilder = new StringBuilder();
+
+        while (!ct.IsCancellationRequested)
+        {
+            var line = await reader.ReadLineAsync(ct);
+            if (line is null)
+            {
+                break;
+            }
+
+            if (line.StartsWith("event:", StringComparison.OrdinalIgnoreCase))
+            {
+                eventName = line["event:".Length..].Trim();
+                continue;
+            }
+
+            if (line.StartsWith("data:", StringComparison.OrdinalIgnoreCase))
+            {
+                dataBuilder.Append(line["data:".Length..].Trim());
+                continue;
+            }
+
+            if (line.Length == 0 && dataBuilder.Length > 0)
+            {
+                var payload = dataBuilder.ToString();
+                dataBuilder.Clear();
+
+                if (string.Equals(eventName, "token", StringComparison.OrdinalIgnoreCase))
+                {
+                    var token = JsonSerializer.Deserialize<AskStreamTokenEvent>(payload);
+                    if (token is not null)
+                    {
+                        yield return new AskStreamEvent("token", Token: token);
+                    }
+                }
+                else if (string.Equals(eventName, "completed", StringComparison.OrdinalIgnoreCase))
+                {
+                    var completed = JsonSerializer.Deserialize<AskStreamCompletedEvent>(payload);
+                    if (completed is not null)
+                    {
+                        yield return new AskStreamEvent("completed", Completed: completed);
+                    }
+                }
+                else if (string.Equals(eventName, "error", StringComparison.OrdinalIgnoreCase))
+                {
+                    var error = JsonSerializer.Deserialize<AskStreamErrorEvent>(payload);
+                    if (error is not null)
+                    {
+                        yield return new AskStreamEvent("error", Error: error);
+                    }
+                }
+
+                eventName = string.Empty;
+            }
+        }
+    }
+
     public async Task<ModelsResponse> GetModelsAsync(CancellationToken ct)
     {
         var response = await _httpClient.GetAsync("models", ct);

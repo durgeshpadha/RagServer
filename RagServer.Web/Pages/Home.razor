@@ -25,6 +25,10 @@
                 <article class="msg @(message.IsUser ? "msg-user" : "msg-ai")">
                     <div class="msg-role">@(message.IsUser ? "You" : "RAG")</div>
                     <p>@message.Text</p>
+                    @if (!message.IsUser && message.IsStopped && !_isAsking)
+                    {
+                        <button type="button" class="regen-btn" @onclick="() => RegenerateAsync(message)">Regenerate</button>
+                    }
                     @if (!message.IsUser && message.Citations.Count > 0)
                     {
                         <details class="citations">
@@ -73,7 +77,13 @@
                 <span>Use Knowledge Base</span>
             </label>
             <textarea rows="2" placeholder="Ask anything about your indexed files..." @bind="_query" disabled="@_isAsking"></textarea>
-            <button type="submit" disabled="@(_isAsking || _isModelsLoading || _availableModels.Count == 0 || string.IsNullOrWhiteSpace(_query))">@(_isAsking ? "Thinking..." : "Send")</button>
+            <div class="chat-actions">
+                <button type="submit" disabled="@(_isAsking || _isModelsLoading || _availableModels.Count == 0 || string.IsNullOrWhiteSpace(_query))">@(_isAsking ? "Thinking..." : "Send")</button>
+                @if (_isAsking)
+                {
+                    <button type="button" class="stop-btn" @onclick="StopGenerating">Stop generating</button>
+                }
+            </div>
         </form>
     </section>
 
@@ -155,6 +165,7 @@
     private List<string> _availableModels = new();
     private string _selectedModel = string.Empty;
     private readonly CancellationTokenSource _lifetimeCts = new();
+    private CancellationTokenSource? _askCts;
 
     protected override async Task OnInitializedAsync()
     {
@@ -172,15 +183,81 @@
         var userText = _query.Trim();
         _query = string.Empty;
         _messages.Add(new ChatMessage(true, userText));
+        var assistantMessage = new ChatMessage(false, string.Empty)
+        {
+            SourcePrompt = userText
+        };
+        _messages.Add(assistantMessage);
+
+        await StreamAssistantResponseAsync(
+            userText,
+            assistantMessage,
+            BuildHistoryPayload());
+    }
+
+    private async Task RegenerateAsync(ChatMessage assistantMessage)
+    {
+        if (_isAsking || assistantMessage.IsUser || string.IsNullOrWhiteSpace(assistantMessage.SourcePrompt))
+        {
+            return;
+        }
+
+        var messageIndex = _messages.IndexOf(assistantMessage);
+        if (messageIndex < 0)
+        {
+            return;
+        }
+
+        var history = BuildHistoryPayload(messageIndex);
+        assistantMessage.Text = string.Empty;
+        assistantMessage.Citations = Array.Empty<Citation>();
+        assistantMessage.IsStopped = false;
+
+        await StreamAssistantResponseAsync(assistantMessage.SourcePrompt!, assistantMessage, history);
+    }
+
+    private async Task StreamAssistantResponseAsync(string userText, ChatMessage assistantMessage, IReadOnlyList<ChatTurn> history)
+    {
         _isAsking = true;
         _isError = false;
         _statusMessage = string.Empty;
 
         try
         {
-            var history = BuildHistoryPayload();
-            var result = await ApiClient.AskAsync(userText, _selectedModel, _useKnowledgeBase, history, _lifetimeCts.Token);
-            _messages.Add(new ChatMessage(false, result.Answer, result.Citations));
+            _askCts = CancellationTokenSource.CreateLinkedTokenSource(_lifetimeCts.Token);
+            await foreach (var streamEvent in ApiClient.StreamAskAsync(userText, _selectedModel, _useKnowledgeBase, history, _askCts.Token))
+            {
+                if (string.Equals(streamEvent.EventType, "token", StringComparison.OrdinalIgnoreCase) && streamEvent.Token is not null)
+                {
+                    assistantMessage.Text += streamEvent.Token.Text;
+                }
+                else if (string.Equals(streamEvent.EventType, "completed", StringComparison.OrdinalIgnoreCase) && streamEvent.Completed is not null)
+                {
+                    assistantMessage.Text = streamEvent.Completed.Answer;
+                    assistantMessage.Citations = streamEvent.Completed.Citations?.ToArray() ?? Array.Empty<Citation>();
+                    assistantMessage.IsStopped = false;
+                }
+                else if (string.Equals(streamEvent.EventType, "error", StringComparison.OrdinalIgnoreCase) && streamEvent.Error is not null)
+                {
+                    _isError = true;
+                    _statusMessage = streamEvent.Error.Message;
+                }
+
+                await InvokeAsync(StateHasChanged);
+            }
+        }
+        catch (OperationCanceledException) when (_askCts?.IsCancellationRequested == true)
+        {
+            if (string.IsNullOrWhiteSpace(assistantMessage.Text))
+            {
+                assistantMessage.Text = "(stopped)";
+            }
+            else
+            {
+                assistantMessage.Text += "\n\n(stopped)";
+            }
+
+            assistantMessage.IsStopped = true;
         }
         catch (Exception ex)
         {
@@ -189,6 +266,8 @@
         }
         finally
         {
+            _askCts?.Dispose();
+            _askCts = null;
             _isAsking = false;
         }
     }
@@ -337,23 +416,45 @@
 
     public void Dispose()
     {
+        _askCts?.Cancel();
+        _askCts?.Dispose();
         _lifetimeCts.Cancel();
         _lifetimeCts.Dispose();
     }
 
-    private sealed record ChatMessage(bool IsUser, string Text, IReadOnlyList<Citation>? Citations = null)
+    private sealed class ChatMessage
     {
-        public IReadOnlyList<Citation> Citations { get; } = Citations ?? Array.Empty<Citation>();
+        public ChatMessage(bool isUser, string text, IReadOnlyList<Citation>? citations = null)
+        {
+            IsUser = isUser;
+            Text = text;
+            Citations = citations ?? Array.Empty<Citation>();
+        }
+
+        public bool IsUser { get; }
+        public string Text { get; set; }
+        public IReadOnlyList<Citation> Citations { get; set; }
+        public bool IsStopped { get; set; }
+        public string? SourcePrompt { get; set; }
     }
 
-    private IReadOnlyList<ChatTurn> BuildHistoryPayload()
+    private IReadOnlyList<ChatTurn> BuildHistoryPayload(int? uptoExclusive = null)
     {
-        return _messages
+        var source = uptoExclusive is int count
+            ? _messages.Take(count)
+            : _messages.AsEnumerable();
+
+        return source
             .TakeLast(HistoryWindowSize)
             .Select(m => new ChatTurn(
                 m.IsUser ? "user" : "assistant",
                 (m.Text ?? string.Empty).Trim()))
             .Where(turn => !string.IsNullOrWhiteSpace(turn.Content))
             .ToArray();
+    }
+
+    private void StopGenerating()
+    {
+        _askCts?.Cancel();
     }
 }
