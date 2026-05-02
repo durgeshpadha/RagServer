@@ -18,7 +18,7 @@ public class RagEngine
         _options = options.Value;
     }
 
-    public async Task<AskResult> AskAsync(string query, string generationModel, CancellationToken ct = default)
+    public async Task<AskResult> AskWithKnowledgeBaseAsync(string query, string generationModel, CancellationToken ct = default)
     {
         var normalizedQuery = EmbeddingService.NormalizeForEmbedding(query);
         if (string.IsNullOrWhiteSpace(normalizedQuery))
@@ -54,6 +54,65 @@ Question: {query}
 Answer:
 ";
 
+        var citations = docs
+            .Select(d => new Citation(Path.GetFileName(d.Source), d.ChunkIndex))
+            .Distinct()
+            .ToArray();
+
+        var answer = await GenerateAsync(prompt, generationModel, ct);
+        return new AskResult(answer, citations);
+    }
+
+    public async Task<AskResult> AskDirectAsync(string query, string generationModel, CancellationToken ct = default)
+    {
+        if (string.IsNullOrWhiteSpace(query))
+        {
+            throw new OllamaResponseException("Query is required.");
+        }
+
+        var prompt = $@"
+You are a concise and accurate assistant.
+Answer the user's question directly. If you are unsure, say so clearly.
+
+Question: {query}
+
+Answer:
+";
+
+        var answer = await GenerateAsync(prompt, generationModel, ct);
+        return new AskResult(answer, Array.Empty<Citation>());
+    }
+
+    private static string BuildBoundedContext(IReadOnlyList<DocumentRecord> docs, int maxContextChars)
+    {
+        if (maxContextChars <= 0)
+        {
+            return string.Empty;
+        }
+
+        var sb = new StringBuilder();
+        foreach (var doc in docs)
+        {
+            var segment = $"[Source: {Path.GetFileName(doc.Source)} | Chunk: {doc.ChunkIndex}]\n{doc.Text}";
+            var withSeparator = sb.Length == 0 ? segment : $"\n\n---\n\n{segment}";
+            if (sb.Length + withSeparator.Length > maxContextChars)
+            {
+                break;
+            }
+
+            sb.Append(withSeparator);
+        }
+
+        return sb.ToString();
+    }
+
+    private class GenResponse
+    {
+        public string Response { get; set; } = "";
+    }
+
+    private async Task<string> GenerateAsync(string prompt, string generationModel, CancellationToken ct)
+    {
         HttpResponseMessage response;
         try
         {
@@ -97,40 +156,7 @@ Answer:
             throw new OllamaResponseException("Generation response was empty.");
         }
 
-        var citations = docs
-            .Select(d => new Citation(Path.GetFileName(d.Source), d.ChunkIndex))
-            .Distinct()
-            .ToArray();
-
-        return new AskResult(result.Response, citations);
-    }
-
-    private static string BuildBoundedContext(IReadOnlyList<DocumentRecord> docs, int maxContextChars)
-    {
-        if (maxContextChars <= 0)
-        {
-            return string.Empty;
-        }
-
-        var sb = new StringBuilder();
-        foreach (var doc in docs)
-        {
-            var segment = $"[Source: {Path.GetFileName(doc.Source)} | Chunk: {doc.ChunkIndex}]\n{doc.Text}";
-            var withSeparator = sb.Length == 0 ? segment : $"\n\n---\n\n{segment}";
-            if (sb.Length + withSeparator.Length > maxContextChars)
-            {
-                break;
-            }
-
-            sb.Append(withSeparator);
-        }
-
-        return sb.ToString();
-    }
-
-    private class GenResponse
-    {
-        public string Response { get; set; } = "";
+        return result.Response;
     }
 }
 

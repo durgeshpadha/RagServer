@@ -1,4 +1,4 @@
-public record AskRequest(string Query, string? Model = null);
+public record AskRequest(string Query, string? Model = null, bool UseKnowledgeBase = true);
 
 public record IngestFailure(string File, string ErrorCode, string Message);
 
@@ -12,6 +12,16 @@ public record IngestResponse(
     long DurationMs);
 
 public record ErrorResponse(string Code, string Message);
+
+public record IngestProgressEvent(
+    string Status,
+    int TotalFiles,
+    int CompletedFiles,
+    int RemainingFiles,
+    int Percent,
+    string? CurrentFile = null,
+    IngestResponse? Summary = null,
+    string? ErrorMessage = null);
 
 public class RagOptions
 {

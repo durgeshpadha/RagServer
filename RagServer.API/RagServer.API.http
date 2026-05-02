@@ -13,7 +13,21 @@ Accept: application/json
 
 {
   "query": "What are the main responsibilities of this API?",
-  "model": "qwen2.5-coder:14b"
+  "model": "qwen2.5-coder:14b",
+  "useKnowledgeBase": true
+}
+
+###
+
+### Ask directly (no knowledge base retrieval)
+POST {{RagServer.Api_HostAddress}}/ask
+Content-Type: application/json
+Accept: application/json
+
+{
+  "query": "Explain vector embeddings in simple terms.",
+  "model": "qwen2.5-coder:14b",
+  "useKnowledgeBase": false
 }
 
 ###
@@ -21,6 +35,12 @@ Accept: application/json
 ### Get configured chat models and default model
 GET {{RagServer.Api_HostAddress}}/models
 Accept: application/json
+
+###
+
+### Stream ingest progress events (SSE)
+POST {{RagServer.Api_HostAddress}}/ingest/stream
+Accept: text/event-stream
 
 ###
 

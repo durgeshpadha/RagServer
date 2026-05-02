@@ -1,5 +1,8 @@
 using System.Net;
 using System.Net.Http.Json;
+using System.Runtime.CompilerServices;
+using System.Text;
+using System.Text.Json;
 using RagServer.Web.Models;
 
 namespace RagServer.Web.Services;
@@ -13,9 +16,9 @@ public sealed class RagApiClient
         _httpClient = httpClient;
     }
 
-    public async Task<AskResponse> AskAsync(string query, string? model, CancellationToken ct)
+    public async Task<AskResponse> AskAsync(string query, string? model, bool useKnowledgeBase, CancellationToken ct)
     {
-        var response = await _httpClient.PostAsJsonAsync("ask", new AskRequest(query, model), ct);
+        var response = await _httpClient.PostAsJsonAsync("ask", new AskRequest(query, model, useKnowledgeBase), ct);
         if (!response.IsSuccessStatusCode)
         {
             throw await CreateApiExceptionAsync(response, ct);
@@ -60,6 +63,52 @@ public sealed class RagApiClient
 
         var result = await response.Content.ReadFromJsonAsync<IngestResponse>(cancellationToken: ct);
         return result ?? throw new InvalidOperationException("API returned an empty ingest response.");
+    }
+
+    public async IAsyncEnumerable<IngestProgressEvent> StreamIngestAsync([EnumeratorCancellation] CancellationToken ct)
+    {
+        using var request = new HttpRequestMessage(HttpMethod.Post, "ingest/stream");
+        using var response = await _httpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct);
+        if (!response.IsSuccessStatusCode)
+        {
+            throw await CreateApiExceptionAsync(response, ct);
+        }
+
+        await using var stream = await response.Content.ReadAsStreamAsync(ct);
+        using var reader = new StreamReader(stream);
+
+        var dataBuilder = new StringBuilder();
+
+        while (!ct.IsCancellationRequested)
+        {
+            var line = await reader.ReadLineAsync(ct);
+            if (line is null)
+            {
+                break;
+            }
+
+            if (line.StartsWith("event:", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            if (line.StartsWith("data:", StringComparison.OrdinalIgnoreCase))
+            {
+                dataBuilder.Append(line["data:".Length..].Trim());
+                continue;
+            }
+
+            if (line.Length == 0 && dataBuilder.Length > 0)
+            {
+                var payload = JsonSerializer.Deserialize<IngestProgressEvent>(dataBuilder.ToString());
+                dataBuilder.Clear();
+
+                if (payload is not null)
+                {
+                    yield return payload;
+                }
+            }
+        }
     }
 
     public async Task<int> GetDataCountAsync(CancellationToken ct)

@@ -68,6 +68,10 @@
                     }
                 </select>
             </div>
+            <label class="kb-toggle">
+                <input type="checkbox" @bind="_useKnowledgeBase" disabled="@_isAsking" />
+                <span>Use Knowledge Base</span>
+            </label>
             <textarea rows="2" placeholder="Ask anything about your indexed files..." @bind="_query" disabled="@_isAsking"></textarea>
             <button type="submit" disabled="@(_isAsking || _isModelsLoading || _availableModels.Count == 0 || string.IsNullOrWhiteSpace(_query))">@(_isAsking ? "Thinking..." : "Send")</button>
         </form>
@@ -94,6 +98,19 @@
                 <h3>Ingest Knowledge Base</h3>
                 <p class="helper">Reads files, creates embeddings, and stores vectors.</p>
                 <button @onclick="RunIngestAsync" disabled="@_isIngesting">@(_isIngesting ? "Ingesting..." : "Run Ingest")</button>
+                @if (_isIngesting || _ingestProgressPercent > 0)
+                {
+                    <div class="ingest-progress">
+                        <div class="ingest-progress-bar" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="@_ingestProgressPercent">
+                            <div class="ingest-progress-fill" style="width: @_ingestProgressPercent%;"></div>
+                        </div>
+                        <p class="helper">@_ingestProgressPercent% · @_ingestCompletedFiles / @_ingestTotalFiles files · Remaining: @_ingestRemainingFiles</p>
+                        @if (!string.IsNullOrWhiteSpace(_ingestCurrentFile))
+                        {
+                            <p class="helper">Current: <code>@_ingestCurrentFile</code></p>
+                        }
+                    </div>
+                }
 
                 @if (_lastIngest is not null)
                 {
@@ -120,6 +137,7 @@
     private readonly List<ChatMessage> _messages = new();
     private string _query = string.Empty;
     private string _statusMessage = string.Empty;
+    private bool _useKnowledgeBase = true;
     private bool _isError;
     private bool _isAsking;
     private bool _isModelsLoading;
@@ -128,6 +146,11 @@
     private bool _isClearBusy;
     private int? _dataCount;
     private IngestResponse? _lastIngest;
+    private int _ingestProgressPercent;
+    private int _ingestTotalFiles;
+    private int _ingestCompletedFiles;
+    private int _ingestRemainingFiles;
+    private string _ingestCurrentFile = string.Empty;
     private List<string> _availableModels = new();
     private string _selectedModel = string.Empty;
     private readonly CancellationTokenSource _lifetimeCts = new();
@@ -154,7 +177,7 @@
 
         try
         {
-            var result = await ApiClient.AskAsync(userText, _selectedModel, _lifetimeCts.Token);
+            var result = await ApiClient.AskAsync(userText, _selectedModel, _useKnowledgeBase, _lifetimeCts.Token);
             _messages.Add(new ChatMessage(false, result.Answer, result.Citations));
         }
         catch (Exception ex)
@@ -214,11 +237,37 @@
         _isIngesting = true;
         _isError = false;
         _statusMessage = string.Empty;
+        _ingestProgressPercent = 0;
+        _ingestTotalFiles = 0;
+        _ingestCompletedFiles = 0;
+        _ingestRemainingFiles = 0;
+        _ingestCurrentFile = string.Empty;
 
         try
         {
-            _lastIngest = await ApiClient.IngestAsync(_lifetimeCts.Token);
-            _statusMessage = _lastIngest.Message;
+            await foreach (var progress in ApiClient.StreamIngestAsync(_lifetimeCts.Token))
+            {
+                _ingestProgressPercent = progress.Percent;
+                _ingestTotalFiles = progress.TotalFiles;
+                _ingestCompletedFiles = progress.CompletedFiles;
+                _ingestRemainingFiles = progress.RemainingFiles;
+                _ingestCurrentFile = progress.CurrentFile ?? string.Empty;
+
+                if (string.Equals(progress.Status, "completed", StringComparison.OrdinalIgnoreCase) && progress.Summary is not null)
+                {
+                    _lastIngest = progress.Summary;
+                    _statusMessage = _lastIngest.Message;
+                }
+
+                if (string.Equals(progress.Status, "error", StringComparison.OrdinalIgnoreCase))
+                {
+                    _isError = true;
+                    _statusMessage = progress.ErrorMessage ?? "Ingest failed.";
+                }
+
+                await InvokeAsync(StateHasChanged);
+            }
+
             await RefreshCountAsync();
         }
         catch (Exception ex)
