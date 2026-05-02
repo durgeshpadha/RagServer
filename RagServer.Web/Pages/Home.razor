@@ -79,6 +79,7 @@
             <textarea rows="2" placeholder="Ask anything about your indexed files..." @bind="_query" disabled="@_isAsking"></textarea>
             <div class="chat-actions">
                 <button type="submit" disabled="@(_isAsking || _isModelsLoading || _availableModels.Count == 0 || string.IsNullOrWhiteSpace(_query))">@(_isAsking ? "Thinking..." : "Send")</button>
+                <button type="button" @onclick="StartNewChatAsync" disabled="@(_messages.Count == 0 && string.IsNullOrWhiteSpace(_query))">New Chat</button>
                 @if (_isAsking)
                 {
                     <button type="button" class="stop-btn" @onclick="StopGenerating">Stop generating</button>
@@ -149,6 +150,19 @@
     </section>
 </div>
 
+@if (_showNewChatConfirm)
+{
+    <div class="modal-backdrop" role="presentation" @onclick="CloseNewChatConfirm"></div>
+    <section class="confirm-modal" role="dialog" aria-modal="true" aria-labelledby="new-chat-confirm-title">
+        <h3 id="new-chat-confirm-title">Start New Chat?</h3>
+        <p>Your current conversation will be cleared.</p>
+        <div class="confirm-actions">
+            <button type="button" @onclick="CloseNewChatConfirm">Cancel</button>
+            <button type="button" class="danger" @onclick="ConfirmStartNewChat">Start New Chat</button>
+        </div>
+    </section>
+}
+
 @code {
     private const int HistoryWindowSize = 10;
     private readonly List<ChatMessage> _messages = new();
@@ -174,6 +188,7 @@
     private readonly CancellationTokenSource _lifetimeCts = new();
     private CancellationTokenSource? _askCts;
     private CancellationTokenSource? _ingestCts;
+    private bool _showNewChatConfirm;
 
     protected override async Task OnInitializedAsync()
     {
@@ -480,6 +495,27 @@
     private void StopGenerating()
     {
         _askCts?.Cancel();
+    }
+
+    private Task StartNewChatAsync()
+    {
+        _showNewChatConfirm = true;
+        return Task.CompletedTask;
+    }
+
+    private void CloseNewChatConfirm()
+    {
+        _showNewChatConfirm = false;
+    }
+
+    private void ConfirmStartNewChat()
+    {
+        _askCts?.Cancel();
+        _messages.Clear();
+        _query = string.Empty;
+        _isError = false;
+        _statusMessage = string.Empty;
+        _showNewChatConfirm = false;
     }
 
     private async Task StopIngest()
