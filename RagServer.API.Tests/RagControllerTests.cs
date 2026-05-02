@@ -173,6 +173,81 @@ public class RagControllerTests
         Assert.Equal(0, json.RootElement.GetProperty("citations").GetArrayLength());
     }
 
+    [Fact]
+    public async Task AskStream_KbOff_EmitsTokenThenCompleted_WithEmptyCitations()
+    {
+        var setup = CreateControllerSetup(addKnowledgeBaseDocument: false);
+        var request = new AskRequest("stream this answer", setup.Options.GenerationModel, UseKnowledgeBase: false);
+        var payload = await InvokeAskStreamAsync(setup.Controller, request);
+
+        Assert.Contains("event: token", payload, StringComparison.Ordinal);
+        Assert.Contains("event: completed", payload, StringComparison.Ordinal);
+        Assert.Contains("\"Citations\":[]", payload, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task AskStream_KbOn_EmitsTokenThenCompleted_WithCitations()
+    {
+        var setup = CreateControllerSetup(addKnowledgeBaseDocument: true);
+        var request = new AskRequest("stream with kb", setup.Options.GenerationModel, UseKnowledgeBase: true);
+        var payload = await InvokeAskStreamAsync(setup.Controller, request);
+
+        Assert.Contains("event: token", payload, StringComparison.Ordinal);
+        Assert.Contains("event: completed", payload, StringComparison.Ordinal);
+        Assert.Contains("\"Citations\":[", payload, StringComparison.Ordinal);
+        Assert.DoesNotContain("\"Citations\":[]", payload, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task AskStream_InvalidModel_ProducesValidationFailure()
+    {
+        var setup = CreateControllerSetup(addKnowledgeBaseDocument: false);
+        var request = new AskRequest("invalid model stream", "bad-model", UseKnowledgeBase: false);
+
+        var httpContext = new DefaultHttpContext();
+        using var responseBody = new MemoryStream();
+        httpContext.Response.Body = responseBody;
+        setup.Controller.ControllerContext = new ControllerContext { HttpContext = httpContext };
+
+        await setup.Controller.AskStream(request, CancellationToken.None);
+
+        Assert.Equal(StatusCodes.Status400BadRequest, httpContext.Response.StatusCode);
+    }
+
+    [Fact]
+    public async Task AskStream_UsesNormalizedHistory_Last10Only()
+    {
+        var setup = CreateControllerSetup(addKnowledgeBaseDocument: false);
+        var history = Enumerable.Range(1, 12)
+            .Select(i => new ChatTurn("user", $"stream-msg-{i}"))
+            .ToArray();
+        var request = new AskRequest("check history", setup.Options.GenerationModel, UseKnowledgeBase: false, History: history);
+
+        await InvokeAskStreamAsync(setup.Controller, request);
+
+        var prompt = Assert.Single(setup.Handler.GeneratePrompts);
+        var historyLines = prompt
+            .Split('\n')
+            .Select(line => line.Trim())
+            .Where(line => line.StartsWith("User: stream-msg-", StringComparison.Ordinal))
+            .ToList();
+
+        Assert.DoesNotContain("User: stream-msg-1", historyLines);
+        Assert.DoesNotContain("User: stream-msg-2", historyLines);
+        Assert.Contains("User: stream-msg-3", historyLines);
+        Assert.Contains("User: stream-msg-12", historyLines);
+    }
+
+    [Fact]
+    public async Task AskStream_ErrorPath_EmitsErrorEvent()
+    {
+        var setup = CreateControllerSetup(addKnowledgeBaseDocument: false);
+        var request = new AskRequest("trigger stream error", setup.Options.GenerationModel, UseKnowledgeBase: false);
+        var payload = await InvokeAskStreamAsync(setup.Controller, request);
+
+        Assert.Contains("event: error", payload, StringComparison.Ordinal);
+    }
+
     private static ControllerSetup CreateControllerSetup(bool addKnowledgeBaseDocument)
     {
         var root = CreateTempRoot();
@@ -234,6 +309,20 @@ public class RagControllerTests
 
     private sealed record ControllerSetup(RagController Controller, TrackingOllamaHandler Handler, RagOptions Options);
 
+    private static async Task<string> InvokeAskStreamAsync(RagController controller, AskRequest request)
+    {
+        var httpContext = new DefaultHttpContext();
+        using var responseBody = new MemoryStream();
+        httpContext.Response.Body = responseBody;
+        controller.ControllerContext = new ControllerContext { HttpContext = httpContext };
+
+        await controller.AskStream(request, CancellationToken.None);
+
+        responseBody.Position = 0;
+        using var reader = new StreamReader(responseBody);
+        return await reader.ReadToEndAsync();
+    }
+
     private sealed class TrackingOllamaHandler : HttpMessageHandler
     {
         public int EmbedCalls { get; private set; }
@@ -260,13 +349,38 @@ public class RagControllerTests
                     ? string.Empty
                     : await request.Content.ReadAsStringAsync(cancellationToken);
 
+                var isStreaming = false;
+
                 if (!string.IsNullOrWhiteSpace(payload))
                 {
                     using var doc = JsonDocument.Parse(payload);
                     if (doc.RootElement.TryGetProperty("prompt", out var promptEl))
                     {
-                        GeneratePrompts.Add(promptEl.GetString() ?? string.Empty);
+                        var prompt = promptEl.GetString() ?? string.Empty;
+                        GeneratePrompts.Add(prompt);
                     }
+
+                    if (doc.RootElement.TryGetProperty("stream", out var streamEl))
+                    {
+                        isStreaming = streamEl.ValueKind == JsonValueKind.True;
+                    }
+                }
+
+                if (isStreaming)
+                {
+                    var hasErrorTrigger = GeneratePrompts.LastOrDefault()?.Contains("trigger stream error", StringComparison.OrdinalIgnoreCase) == true;
+                    if (hasErrorTrigger)
+                    {
+                        return new HttpResponseMessage(HttpStatusCode.OK)
+                        {
+                            Content = new StringContent("{\"error\":\"simulated stream error\",\"done\":true}\n")
+                        };
+                    }
+
+                    return new HttpResponseMessage(HttpStatusCode.OK)
+                    {
+                        Content = new StringContent("{\"response\":\"direct-\",\"done\":false}\n{\"response\":\"answer\",\"done\":false}\n{\"done\":true}\n")
+                    };
                 }
 
                 return new HttpResponseMessage(HttpStatusCode.OK)
