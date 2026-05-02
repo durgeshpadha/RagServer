@@ -65,7 +65,10 @@
 
         <form class="chat-form" @onsubmit="HandleAskAsync">
             <div class="model-picker">
-                <label for="model-select">Model</label>
+                <div class="model-row">
+                    <label for="model-select">Model</label>
+                    <button type="button" @onclick="StartNewChatAsync" disabled="@(_messages.Count == 0 && string.IsNullOrWhiteSpace(_query))">New Chat</button>
+                </div>
                 <select id="model-select" @bind="_selectedModel" disabled="@(_isAsking || _isModelsLoading || _availableModels.Count == 0)">
                     @if (_availableModels.Count == 0)
                     {
@@ -87,7 +90,6 @@
             <textarea rows="2" placeholder="Ask anything about your indexed files..." @bind="_query" disabled="@_isAsking"></textarea>
             <div class="chat-actions">
                 <button type="submit" disabled="@(_isAsking || _isModelsLoading || _availableModels.Count == 0 || string.IsNullOrWhiteSpace(_query))">@(_isAsking ? "Thinking..." : "Send")</button>
-                <button type="button" @onclick="StartNewChatAsync" disabled="@(_messages.Count == 0 && string.IsNullOrWhiteSpace(_query))">New Chat</button>
                 @if (_isAsking)
                 {
                     <button type="button" class="stop-btn" @onclick="StopGenerating">Stop generating</button>

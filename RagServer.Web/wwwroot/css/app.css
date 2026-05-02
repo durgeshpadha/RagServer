@@ -262,6 +262,13 @@ h1, h2, h3 {
     color: var(--muted);
 }
 
+.model-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+}
+
 .model-picker select {
     font: inherit;
     border-radius: 12px;
