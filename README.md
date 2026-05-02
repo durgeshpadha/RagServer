@@ -50,7 +50,35 @@ foreach ($repo in $repos) {
 ## Prerequisites
 
 - .NET SDK 10
+- Qdrant (vector database) running at `http://localhost:6333`
 - Ollama (or compatible endpoint) running for embeddings/generation
+
+### Qdrant via Docker Compose
+
+This repo includes [`docker-compose.yml`] for Qdrant.
+
+Start Qdrant:
+
+```bash
+docker compose up -d
+```
+
+Verify it is running:
+
+```bash
+docker compose ps
+```
+
+Qdrant endpoints:
+
+- `http://localhost:6333` (HTTP API)
+- `http://localhost:6334` (gRPC)
+
+Stop Qdrant:
+
+```bash
+docker compose down
+```
 
 ### Ollama Models
 
