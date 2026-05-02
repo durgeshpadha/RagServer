@@ -19,6 +19,13 @@ public record IngestResponse(
 
 public record ErrorResponse(string Code, string Message);
 
+public record IngestFileProgress(
+    string File,
+    int CompletedChunks,
+    int TotalChunks,
+    int Percent,
+    string Stage);
+
 public record IngestProgressEvent(
     string Status,
     int TotalFiles,
@@ -28,7 +35,8 @@ public record IngestProgressEvent(
     string? OperationId = null,
     string? CurrentFile = null,
     IngestResponse? Summary = null,
-    string? ErrorMessage = null);
+    string? ErrorMessage = null,
+    IngestFileProgress? FileProgress = null);
 
 public record IngestStartResponse(string OperationId);
 public record IngestCancelResponse(string OperationId, string Status, string Message);

@@ -525,10 +525,34 @@ public class RagController : ControllerBase
             },
             async (file, token) =>
             {
+                Func<IngestFileProgress, Task>? fileProgressCallback = null;
+                if (progressCallback is not null)
+                {
+                    fileProgressCallback = async fileProgress =>
+                    {
+                        var completedSnapshot = Volatile.Read(ref completedFiles);
+                        var remainingSnapshot = Math.Max(0, totalFiles - completedSnapshot);
+                        var overallPercentSnapshot = totalFiles == 0
+                            ? 100
+                            : (int)Math.Round((completedSnapshot * 100d) / totalFiles);
+
+                        await progressCallback(new IngestProgressEvent(
+                            "progress",
+                            totalFiles,
+                            completedSnapshot,
+                            remainingSnapshot,
+                            overallPercentSnapshot,
+                            operationId,
+                            fileProgress.File,
+                            FileProgress: fileProgress));
+                    };
+                }
+
                 var fileResult = await ProcessFileAsync(
                     file,
                     root,
                     ragOptions,
+                    fileProgressCallback,
                     token);
 
                 if (fileResult.Indexed)
@@ -576,11 +600,42 @@ public class RagController : ControllerBase
         string file,
         string root,
         RagOptions ragOptions,
+        Func<IngestFileProgress, Task>? fileProgressCallback,
         CancellationToken ct)
     {
         ct.ThrowIfCancellationRequested();
         var displayFile = GetSafeFileDisplay(root, file);
         var status = "indexed";
+        var totalChunks = 0;
+        var completedChunks = 0;
+        var lastReportedPercent = -1;
+
+        async Task ReportFileProgressAsync(string stage, int completed, int total, bool force = false)
+        {
+            if (fileProgressCallback is null)
+            {
+                return;
+            }
+
+            var normalizedCompleted = Math.Max(0, completed);
+            var normalizedTotal = Math.Max(0, total);
+            var percent = normalizedTotal == 0
+                ? (stage is "completed" or "skipped" ? 100 : 0)
+                : Math.Clamp((int)Math.Round((normalizedCompleted * 100d) / normalizedTotal), 0, 100);
+
+            if (!force && percent == lastReportedPercent)
+            {
+                return;
+            }
+
+            lastReportedPercent = percent;
+            await fileProgressCallback(new IngestFileProgress(
+                displayFile,
+                normalizedCompleted,
+                normalizedTotal,
+                percent,
+                stage));
+        }
 
         try
         {
@@ -590,6 +645,7 @@ public class RagController : ControllerBase
                 if (fileSize > ragOptions.MaxIngestFileBytes)
                 {
                     status = "skipped";
+                    await ReportFileProgressAsync("skipped", 0, 0, force: true);
                     return new IngestFileResult(
                         displayFile,
                         status,
@@ -608,6 +664,21 @@ public class RagController : ControllerBase
             text = text.Replace("\r\n", "\n").Trim();
             if (string.IsNullOrWhiteSpace(text))
             {
+                await ReportFileProgressAsync("skipped", 0, 0, force: true);
+                return new IngestFileResult(displayFile, "skipped", Indexed: false, ChunksAdded: 0, Failure: null);
+            }
+
+            foreach (var _ in SplitIntoChunks(text, ragOptions.ChunkSizeChars, ragOptions.ChunkOverlapChars))
+            {
+                ct.ThrowIfCancellationRequested();
+                totalChunks++;
+            }
+
+            await ReportFileProgressAsync("reading", 0, totalChunks, force: true);
+
+            if (totalChunks == 0)
+            {
+                await ReportFileProgressAsync("skipped", 0, 0, force: true);
                 return new IngestFileResult(displayFile, "skipped", Indexed: false, ChunksAdded: 0, Failure: null);
             }
 
@@ -625,6 +696,8 @@ public class RagController : ControllerBase
                 var normalizedChunk = EmbeddingService.NormalizeForEmbedding(chunk);
                 if (string.IsNullOrWhiteSpace(normalizedChunk))
                 {
+                    completedChunks++;
+                    await ReportFileProgressAsync("embedding", completedChunks, totalChunks);
                     chunkIndex++;
                     continue;
                 }
@@ -639,10 +712,13 @@ public class RagController : ControllerBase
                     Embedding = embedding
                 });
 
+                completedChunks++;
+                await ReportFileProgressAsync("embedding", completedChunks, totalChunks);
                 chunkIndex++;
 
                 if (batch.Count >= batchSize)
                 {
+                    await ReportFileProgressAsync("upserting", completedChunks, totalChunks, force: true);
                     await _vectorStore.UpsertAsync(collection, batch, ct);
                     chunksAdded += batch.Count;
                     batch.Clear();
@@ -651,15 +727,18 @@ public class RagController : ControllerBase
 
             if (batch.Count > 0)
             {
+                await ReportFileProgressAsync("upserting", completedChunks, totalChunks, force: true);
                 await _vectorStore.UpsertAsync(collection, batch, ct);
                 chunksAdded += batch.Count;
             }
 
             if (chunksAdded == 0)
             {
+                await ReportFileProgressAsync("skipped", completedChunks, totalChunks, force: true);
                 return new IngestFileResult(displayFile, "skipped", Indexed: false, ChunksAdded: 0, Failure: null);
             }
 
+            await ReportFileProgressAsync("completed", completedChunks, totalChunks, force: true);
             return new IngestFileResult(displayFile, status, Indexed: true, ChunksAdded: chunksAdded, Failure: null);
         }
         catch (OperationCanceledException)
@@ -669,21 +748,25 @@ public class RagController : ControllerBase
         catch (OllamaTimeoutException ex)
         {
             _logger.LogWarning(ex, "Embedding timeout for {File}", displayFile);
+            await ReportFileProgressAsync("failed", completedChunks, totalChunks, force: true);
             return new IngestFileResult(displayFile, "failed", Indexed: false, ChunksAdded: 0, Failure: new IngestFailure(displayFile, "embedding_timeout", "Embedding request timed out."));
         }
         catch (OllamaRequestException ex)
         {
             _logger.LogWarning(ex, "Embedding request failed for {File}", displayFile);
+            await ReportFileProgressAsync("failed", completedChunks, totalChunks, force: true);
             return new IngestFileResult(displayFile, "failed", Indexed: false, ChunksAdded: 0, Failure: new IngestFailure(displayFile, "embedding_unavailable", "Embedding service unavailable."));
         }
         catch (OllamaResponseException ex)
         {
             _logger.LogWarning(ex, "Embedding response invalid for {File}", displayFile);
+            await ReportFileProgressAsync("failed", completedChunks, totalChunks, force: true);
             return new IngestFileResult(displayFile, "failed", Indexed: false, ChunksAdded: 0, Failure: new IngestFailure(displayFile, "embedding_bad_response", "Embedding service returned an invalid response."));
         }
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "Ingest failed for {File}", displayFile);
+            await ReportFileProgressAsync("failed", completedChunks, totalChunks, force: true);
             return new IngestFileResult(displayFile, "failed", Indexed: false, ChunksAdded: 0, Failure: new IngestFailure(displayFile, "ingest_failed", "Failed to ingest file."));
         }
     }

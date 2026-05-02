@@ -193,9 +193,22 @@ public class RagControllerTests
             .ToList();
 
         var progressEvents = new List<int>();
+        var sawFileProgress = false;
         foreach (var json in jsonPayloads)
         {
             using var doc = JsonDocument.Parse(json);
+            if (doc.RootElement.TryGetProperty("FileProgress", out var fileProgressEl) &&
+                fileProgressEl.ValueKind == JsonValueKind.Object)
+            {
+                sawFileProgress = true;
+                var percent = fileProgressEl.GetProperty("Percent").GetInt32();
+                var completedChunks = fileProgressEl.GetProperty("CompletedChunks").GetInt32();
+                var totalChunks = fileProgressEl.GetProperty("TotalChunks").GetInt32();
+                Assert.InRange(percent, 0, 100);
+                Assert.True(completedChunks >= 0);
+                Assert.True(totalChunks >= 0);
+            }
+
             if (doc.RootElement.TryGetProperty("Status", out var statusEl)
                 && string.Equals(statusEl.GetString(), "indexed", StringComparison.OrdinalIgnoreCase))
             {
@@ -210,7 +223,97 @@ public class RagControllerTests
                 && percentEl.GetInt32() == 100;
         });
         Assert.True(progressEvents.SequenceEqual(progressEvents.OrderBy(v => v)));
+        Assert.True(sawFileProgress);
         Assert.True(setup.Handler.EmbedCalls > 0);
+    }
+
+    [Fact]
+    public async Task IngestStream_WhenFileEmbeddingFails_EmitsFailedFileProgressStage()
+    {
+        var setup = CreateControllerSetup(
+            addKnowledgeBaseDocument: false,
+            configureKnowledgeBase: kbPath =>
+            {
+                File.WriteAllText(Path.Combine(kbPath, "will-fail.txt"), "force-embed-fail");
+            });
+
+        var httpContext = new DefaultHttpContext();
+        using var responseBody = new MemoryStream();
+        httpContext.Response.Body = responseBody;
+        setup.Controller.ControllerContext = new ControllerContext { HttpContext = httpContext };
+
+        await setup.Controller.IngestStream(CancellationToken.None);
+
+        responseBody.Position = 0;
+        using var reader = new StreamReader(responseBody);
+        var payload = await reader.ReadToEndAsync();
+
+        var jsonPayloads = payload
+            .Split('\n', StringSplitOptions.RemoveEmptyEntries)
+            .Where(line => line.StartsWith("data:", StringComparison.Ordinal))
+            .Select(line => line["data:".Length..].Trim())
+            .ToList();
+
+        var hasFailedStage = jsonPayloads.Any(json =>
+        {
+            using var doc = JsonDocument.Parse(json);
+            if (!doc.RootElement.TryGetProperty("FileProgress", out var fileProgressEl) ||
+                fileProgressEl.ValueKind != JsonValueKind.Object)
+            {
+                return false;
+            }
+
+            if (!fileProgressEl.TryGetProperty("Stage", out var stageEl))
+            {
+                return false;
+            }
+
+            return string.Equals(stageEl.GetString(), "failed", StringComparison.OrdinalIgnoreCase);
+        });
+
+        Assert.True(hasFailedStage);
+    }
+
+    [Fact]
+    public async Task IngestOperationStream_WhenCanceled_EmitsCanceledAndNotCompleted()
+    {
+        var setup = CreateControllerSetup(
+            addKnowledgeBaseDocument: false,
+            configureKnowledgeBase: kbPath =>
+            {
+                var slowPayload = string.Join('\n', Enumerable.Repeat("slow-embed " + new string('x', 180), 120));
+                File.WriteAllText(Path.Combine(kbPath, "slow-cancel.txt"), slowPayload);
+            },
+            configureOptions: options =>
+            {
+                options.ChunkSizeChars = 120;
+                options.ChunkOverlapChars = 20;
+                options.IngestMaxParallelFiles = 1;
+            });
+
+        var start = setup.Controller.IngestStart();
+        var ok = Assert.IsType<OkObjectResult>(start.Result);
+        var startPayload = Assert.IsType<IngestStartResponse>(ok.Value);
+
+        var httpContext = new DefaultHttpContext();
+        using var responseBody = new MemoryStream();
+        httpContext.Response.Body = responseBody;
+        setup.Controller.ControllerContext = new ControllerContext { HttpContext = httpContext };
+
+        var streamTask = setup.Controller.IngestOperationStream(startPayload.OperationId, CancellationToken.None);
+        await Task.Delay(120);
+
+        var cancel = setup.Controller.IngestCancel(startPayload.OperationId);
+        Assert.IsType<OkObjectResult>(cancel.Result);
+
+        await streamTask;
+
+        responseBody.Position = 0;
+        using var reader = new StreamReader(responseBody);
+        var payload = await reader.ReadToEndAsync();
+
+        Assert.Contains("event: canceled", payload, StringComparison.Ordinal);
+        Assert.DoesNotContain("event: completed", payload, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -442,6 +545,22 @@ public class RagControllerTests
             if (path.EndsWith("/api/embed", StringComparison.OrdinalIgnoreCase))
             {
                 EmbedCalls++;
+                var embedPayload = request.Content is null
+                    ? string.Empty
+                    : await request.Content.ReadAsStringAsync(cancellationToken);
+                if (embedPayload.Contains("slow-embed", StringComparison.OrdinalIgnoreCase))
+                {
+                    await Task.Delay(75, cancellationToken);
+                }
+
+                if (embedPayload.Contains("force-embed-fail", StringComparison.OrdinalIgnoreCase))
+                {
+                    return new HttpResponseMessage(HttpStatusCode.ServiceUnavailable)
+                    {
+                        Content = new StringContent("{\"error\":\"forced embedding failure\"}")
+                    };
+                }
+
                 return new HttpResponseMessage(HttpStatusCode.OK)
                 {
                     Content = new StringContent("{\"embedding\":[0.1,0.2,0.3]}")

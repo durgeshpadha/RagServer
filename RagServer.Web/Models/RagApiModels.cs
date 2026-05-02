@@ -31,6 +31,13 @@ public sealed record ClearDataResponse(string Message, int Removed);
 
 public sealed record ModelsResponse(string DefaultModel, IReadOnlyList<string> Models);
 
+public sealed record IngestFileProgress(
+    string File,
+    int CompletedChunks,
+    int TotalChunks,
+    int Percent,
+    string Stage);
+
 public sealed record IngestProgressEvent(
     string Status,
     int TotalFiles,
@@ -40,7 +47,8 @@ public sealed record IngestProgressEvent(
     string? OperationId = null,
     string? CurrentFile = null,
     IngestResponse? Summary = null,
-    string? ErrorMessage = null);
+    string? ErrorMessage = null,
+    IngestFileProgress? FileProgress = null);
 
 public sealed record IngestStartResponse(string OperationId);
 public sealed record IngestCancelResponse(string OperationId, string Status, string Message);

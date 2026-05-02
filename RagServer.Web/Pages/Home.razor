@@ -131,7 +131,16 @@
                         <div class="ingest-progress-bar" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="@_ingestProgressPercent">
                             <div class="ingest-progress-fill" style="width: @_ingestProgressPercent%;"></div>
                         </div>
-                        <p class="helper">@_ingestProgressPercent% · @_ingestCompletedFiles / @_ingestTotalFiles files · Remaining: @_ingestRemainingFiles</p>
+                        <p class="helper">@_ingestProgressPercent% | @_ingestCompletedFiles / @_ingestTotalFiles files | Remaining: @_ingestRemainingFiles</p>
+                        @if (_isIngesting || _ingestFileTotalChunks > 0)
+                        {
+                            <div class="ingest-progress ingest-progress-secondary">
+                                <div class="ingest-progress-bar" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="@_ingestFileProgressPercent">
+                                    <div class="ingest-progress-fill" style="width: @_ingestFileProgressPercent%;"></div>
+                                </div>
+                                <p class="helper">Current file: @_ingestFileProgressPercent% | @_ingestFileCompletedChunks / @_ingestFileTotalChunks chunks | Stage: <span class="@GetIngestStageClass(_ingestFileStage)">@_ingestFileStage</span></p>
+                            </div>
+                        }
                         @if (!string.IsNullOrWhiteSpace(_ingestCurrentFile))
                         {
                             <p class="helper ingest-current-file">Current: <code class="ingest-file-name">@_ingestCurrentFile</code></p>
@@ -149,6 +158,23 @@
                         <div><dt>Failures</dt><dd>@_lastIngest.Failures.Count</dd></div>
                         <div><dt>Duration</dt><dd>@_lastIngest.DurationMs ms</dd></div>
                     </dl>
+                }
+
+                @if (_ingestErrors.Count > 0)
+                {
+                    <div class="ingest-errors-head">
+                        <h4>Ingest Errors (@_ingestErrors.Count)</h4>
+                        <button type="button" class="danger" @onclick="ClearIngestErrors">Clear Errors</button>
+                    </div>
+                    <ul class="ingest-errors-list">
+                        @foreach (var err in _ingestErrors)
+                        {
+                            <li>
+                                <p><strong>@err.ErrorCode</strong>: @err.Message</p>
+                                <p><code class="ingest-file-name">@err.File</code></p>
+                            </li>
+                        }
+                    </ul>
                 }
             </article>
 
@@ -192,6 +218,11 @@
     private int _ingestCompletedFiles;
     private int _ingestRemainingFiles;
     private string _ingestCurrentFile = string.Empty;
+    private int _ingestFileProgressPercent;
+    private int _ingestFileCompletedChunks;
+    private int _ingestFileTotalChunks;
+    private string _ingestFileStage = "idle";
+    private readonly List<IngestUiError> _ingestErrors = new();
     private string? _activeIngestOperationId;
     private List<string> _availableModels = new();
     private string _selectedModel = string.Empty;
@@ -356,6 +387,10 @@
         _ingestCompletedFiles = 0;
         _ingestRemainingFiles = 0;
         _ingestCurrentFile = string.Empty;
+        _ingestFileProgressPercent = 0;
+        _ingestFileCompletedChunks = 0;
+        _ingestFileTotalChunks = 0;
+        _ingestFileStage = "idle";
 
         try
         {
@@ -369,17 +404,34 @@
                 _ingestCompletedFiles = progress.CompletedFiles;
                 _ingestRemainingFiles = progress.RemainingFiles;
                 _ingestCurrentFile = progress.CurrentFile ?? string.Empty;
+                if (progress.FileProgress is not null)
+                {
+                    _ingestFileProgressPercent = progress.FileProgress.Percent;
+                    _ingestFileCompletedChunks = progress.FileProgress.CompletedChunks;
+                    _ingestFileTotalChunks = progress.FileProgress.TotalChunks;
+                    _ingestFileStage = progress.FileProgress.Stage;
+                    if (!string.IsNullOrWhiteSpace(progress.FileProgress.File))
+                    {
+                        _ingestCurrentFile = progress.FileProgress.File;
+                    }
+                }
 
                 if (string.Equals(progress.Status, "completed", StringComparison.OrdinalIgnoreCase) && progress.Summary is not null)
                 {
                     _lastIngest = progress.Summary;
                     _statusMessage = _lastIngest.Message;
+                    foreach (var failure in _lastIngest.Failures)
+                    {
+                        AddIngestError(failure.File, failure.ErrorCode, failure.Message);
+                    }
                 }
 
                 if (string.Equals(progress.Status, "error", StringComparison.OrdinalIgnoreCase))
                 {
                     _isError = true;
-                    _statusMessage = progress.ErrorMessage ?? "Ingest failed.";
+                    var errorMessage = progress.ErrorMessage ?? "Ingest failed.";
+                    _statusMessage = errorMessage;
+                    AddIngestError("(operation)", "ingest_error", errorMessage);
                 }
                 else if (string.Equals(progress.Status, "canceled", StringComparison.OrdinalIgnoreCase))
                 {
@@ -387,6 +439,12 @@
                 }
 
                 await InvokeAsync(StateHasChanged);
+            }
+
+            if (_ingestCts?.IsCancellationRequested == true)
+            {
+                _statusMessage = "Ingest stopped.";
+                return;
             }
 
             await RefreshCountAsync();
@@ -399,6 +457,7 @@
         {
             _isError = true;
             _statusMessage = ex.Message;
+            AddIngestError("(operation)", "client_error", ex.Message);
         }
         finally
         {
@@ -530,6 +589,9 @@
 
     private async Task StopIngest()
     {
+        _ingestCts?.Cancel();
+        _statusMessage = "Stopping ingest...";
+
         if (!string.IsNullOrWhiteSpace(_activeIngestOperationId))
         {
             try
@@ -541,7 +603,48 @@
                 // Fallback to local cancel if API cancel call fails.
             }
         }
-
-        _ingestCts?.Cancel();
     }
+
+    private void ClearIngestErrors()
+    {
+        _ingestErrors.Clear();
+    }
+
+    private void AddIngestError(string file, string errorCode, string message)
+    {
+        if (string.IsNullOrWhiteSpace(message))
+        {
+            return;
+        }
+
+        var normalizedFile = string.IsNullOrWhiteSpace(file) ? "(operation)" : file.Trim();
+        var normalizedCode = string.IsNullOrWhiteSpace(errorCode) ? "ingest_error" : errorCode.Trim();
+        var normalizedMessage = message.Trim();
+
+        var alreadyExists = _ingestErrors.Any(err =>
+            string.Equals(err.File, normalizedFile, StringComparison.OrdinalIgnoreCase) &&
+            string.Equals(err.ErrorCode, normalizedCode, StringComparison.OrdinalIgnoreCase) &&
+            string.Equals(err.Message, normalizedMessage, StringComparison.Ordinal));
+        if (alreadyExists)
+        {
+            return;
+        }
+
+        _ingestErrors.Add(new IngestUiError(normalizedFile, normalizedCode, normalizedMessage));
+    }
+
+    private static string GetIngestStageClass(string? stage)
+    {
+        return stage?.Trim().ToLowerInvariant() switch
+        {
+            "embedding" => "stage-pill stage-embedding",
+            "upserting" => "stage-pill stage-upserting",
+            "failed" => "stage-pill stage-failed",
+            "completed" => "stage-pill stage-completed",
+            "skipped" => "stage-pill stage-skipped",
+            _ => "stage-pill"
+        };
+    }
+
+    private sealed record IngestUiError(string File, string ErrorCode, string Message);
 }
