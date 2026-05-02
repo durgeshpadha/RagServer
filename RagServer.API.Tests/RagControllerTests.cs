@@ -30,6 +30,49 @@ public class RagControllerTests
     }
 
     [Fact]
+    public async Task Ask_WithHistory_IncludesConversationInPrompt()
+    {
+        var setup = CreateControllerSetup(addKnowledgeBaseDocument: false);
+        var history = new[]
+        {
+            new ChatTurn("user", "do you have knowledge about .net 10?"),
+            new ChatTurn("assistant", "Yes, I do."),
+        };
+        var request = new AskRequest("tell me about it", setup.Options.GenerationModel, UseKnowledgeBase: false, History: history);
+
+        await setup.Controller.Ask(request, CancellationToken.None);
+
+        var prompt = Assert.Single(setup.Handler.GeneratePrompts);
+        Assert.Contains("User: do you have knowledge about .net 10?", prompt, StringComparison.Ordinal);
+        Assert.Contains("Assistant: Yes, I do.", prompt, StringComparison.Ordinal);
+        Assert.Contains("Current Question: tell me about it", prompt, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Ask_WithMoreThanTenHistoryItems_UsesOnlyLastTen()
+    {
+        var setup = CreateControllerSetup(addKnowledgeBaseDocument: false);
+        var history = Enumerable.Range(1, 12)
+            .Select(i => new ChatTurn("user", $"msg-{i}"))
+            .ToArray();
+        var request = new AskRequest("latest?", setup.Options.GenerationModel, UseKnowledgeBase: false, History: history);
+
+        await setup.Controller.Ask(request, CancellationToken.None);
+
+        var prompt = Assert.Single(setup.Handler.GeneratePrompts);
+        var historyLines = prompt
+            .Split('\n')
+            .Select(line => line.Trim())
+            .Where(line => line.StartsWith("User: msg-", StringComparison.Ordinal))
+            .ToList();
+
+        Assert.DoesNotContain("User: msg-1", historyLines);
+        Assert.DoesNotContain("User: msg-2", historyLines);
+        Assert.Contains("User: msg-3", historyLines);
+        Assert.Contains("User: msg-12", historyLines);
+    }
+
+    [Fact]
     public async Task Ask_UseKnowledgeBaseTrue_WithNoDocs_ReturnsFallbackMessage()
     {
         var setup = CreateControllerSetup(addKnowledgeBaseDocument: false);
@@ -44,6 +87,31 @@ public class RagControllerTests
         Assert.Equal(0, setup.Handler.GenerateCalls);
         Assert.Equal("I couldn't find relevant information in the knowledge base.", json.RootElement.GetProperty("answer").GetString());
         Assert.Equal(0, json.RootElement.GetProperty("citations").GetArrayLength());
+    }
+
+    [Fact]
+    public async Task Ask_UseKnowledgeBaseTrue_WithHistoryAndDocs_UsesRetrievalAndCitations()
+    {
+        var setup = CreateControllerSetup(addKnowledgeBaseDocument: true);
+        var history = new[]
+        {
+            new ChatTurn("user", "What is in the sample document?"),
+            new ChatTurn("assistant", "I can check the indexed file.")
+        };
+        var request = new AskRequest("tell me about it", setup.Options.GenerationModel, UseKnowledgeBase: true, History: history);
+
+        var result = await setup.Controller.Ask(request, CancellationToken.None);
+
+        var ok = Assert.IsType<OkObjectResult>(result);
+        using var json = JsonDocument.Parse(JsonSerializer.Serialize(ok.Value));
+
+        Assert.Equal(1, setup.Handler.EmbedCalls);
+        Assert.Equal(1, setup.Handler.GenerateCalls);
+        Assert.True(json.RootElement.GetProperty("citations").GetArrayLength() > 0);
+
+        var prompt = Assert.Single(setup.Handler.GeneratePrompts);
+        Assert.Contains("Conversation History:", prompt, StringComparison.Ordinal);
+        Assert.Contains("Context:", prompt, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -91,6 +159,20 @@ public class RagControllerTests
         Assert.True(setup.Handler.EmbedCalls > 0);
     }
 
+    [Fact]
+    public async Task Ask_WithoutHistory_RemainsBackwardCompatible()
+    {
+        var setup = CreateControllerSetup(addKnowledgeBaseDocument: false);
+        var request = new AskRequest("simple question", setup.Options.GenerationModel, UseKnowledgeBase: false);
+
+        var result = await setup.Controller.Ask(request, CancellationToken.None);
+
+        var ok = Assert.IsType<OkObjectResult>(result);
+        using var json = JsonDocument.Parse(JsonSerializer.Serialize(ok.Value));
+        Assert.Equal("direct-answer", json.RootElement.GetProperty("answer").GetString());
+        Assert.Equal(0, json.RootElement.GetProperty("citations").GetArrayLength());
+    }
+
     private static ControllerSetup CreateControllerSetup(bool addKnowledgeBaseDocument)
     {
         var root = CreateTempRoot();
@@ -120,6 +202,17 @@ public class RagControllerTests
         var httpClient = new HttpClient(handler);
         var embeddingService = new EmbeddingService(httpClient, optionsWrapper);
         var vectorStore = new VectorStore(env, optionsWrapper, NullLogger<VectorStore>.Instance);
+        if (addKnowledgeBaseDocument)
+        {
+            vectorStore.Add(new DocumentRecord
+            {
+                Id = "seed-1",
+                Source = Path.Combine(kbPath, "sample.txt"),
+                ChunkIndex = 0,
+                Text = "This is a sample knowledge base document.",
+                Embedding = new[] { 0.1f, 0.2f, 0.3f }
+            });
+        }
         var ragEngine = new RagEngine(embeddingService, vectorStore, httpClient, optionsWrapper);
         var controller = new RagController(
             embeddingService,
@@ -145,30 +238,44 @@ public class RagControllerTests
     {
         public int EmbedCalls { get; private set; }
         public int GenerateCalls { get; private set; }
+        public List<string> GeneratePrompts { get; } = new();
 
-        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
         {
             var path = request.RequestUri?.AbsolutePath ?? string.Empty;
 
             if (path.EndsWith("/api/embed", StringComparison.OrdinalIgnoreCase))
             {
                 EmbedCalls++;
-                return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+                return new HttpResponseMessage(HttpStatusCode.OK)
                 {
                     Content = new StringContent("{\"embedding\":[0.1,0.2,0.3]}")
-                });
+                };
             }
 
             if (path.EndsWith("/api/generate", StringComparison.OrdinalIgnoreCase))
             {
                 GenerateCalls++;
-                return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+                var payload = request.Content is null
+                    ? string.Empty
+                    : await request.Content.ReadAsStringAsync(cancellationToken);
+
+                if (!string.IsNullOrWhiteSpace(payload))
+                {
+                    using var doc = JsonDocument.Parse(payload);
+                    if (doc.RootElement.TryGetProperty("prompt", out var promptEl))
+                    {
+                        GeneratePrompts.Add(promptEl.GetString() ?? string.Empty);
+                    }
+                }
+
+                return new HttpResponseMessage(HttpStatusCode.OK)
                 {
                     Content = new StringContent("{\"response\":\"direct-answer\"}")
-                });
+                };
             }
 
-            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.NotFound));
+            return new HttpResponseMessage(HttpStatusCode.NotFound);
         }
     }
 

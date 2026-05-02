@@ -1,6 +1,12 @@
 namespace RagServer.Web.Models;
 
-public sealed record AskRequest(string Query, string? Model = null, bool UseKnowledgeBase = true);
+public sealed record ChatTurn(string Role, string Content);
+
+public sealed record AskRequest(
+    string Query,
+    string? Model = null,
+    bool UseKnowledgeBase = true,
+    IReadOnlyList<ChatTurn>? History = null);
 
 public sealed record AskResponse(string Answer, IReadOnlyList<Citation> Citations);
 

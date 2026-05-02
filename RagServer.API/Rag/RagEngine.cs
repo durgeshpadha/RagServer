@@ -18,7 +18,11 @@ public class RagEngine
         _options = options.Value;
     }
 
-    public async Task<AskResult> AskWithKnowledgeBaseAsync(string query, string generationModel, CancellationToken ct = default)
+    public async Task<AskResult> AskWithKnowledgeBaseAsync(
+        string query,
+        string generationModel,
+        IReadOnlyList<ChatTurn>? history = null,
+        CancellationToken ct = default)
     {
         var normalizedQuery = EmbeddingService.NormalizeForEmbedding(query);
         if (string.IsNullOrWhiteSpace(normalizedQuery))
@@ -37,6 +41,7 @@ public class RagEngine
 
         var context = BuildBoundedContext(docs, _options.MaxContextChars);
 
+        var historySection = BuildHistorySection(history);
         var prompt = $@"
 You are a precise assistant answering questions using ONLY the provided context.
 
@@ -46,10 +51,13 @@ Rules:
 - Prefer concise, accurate answers
 - Quote relevant parts when useful
 
+Conversation History:
+{historySection}
+
 Context:
 {context}
 
-Question: {query}
+Current Question: {query}
 
 Answer:
 ";
@@ -63,18 +71,26 @@ Answer:
         return new AskResult(answer, citations);
     }
 
-    public async Task<AskResult> AskDirectAsync(string query, string generationModel, CancellationToken ct = default)
+    public async Task<AskResult> AskDirectAsync(
+        string query,
+        string generationModel,
+        IReadOnlyList<ChatTurn>? history = null,
+        CancellationToken ct = default)
     {
         if (string.IsNullOrWhiteSpace(query))
         {
             throw new OllamaResponseException("Query is required.");
         }
 
+        var historySection = BuildHistorySection(history);
         var prompt = $@"
 You are a concise and accurate assistant.
 Answer the user's question directly. If you are unsure, say so clearly.
 
-Question: {query}
+Conversation History:
+{historySection}
+
+Current Question: {query}
 
 Answer:
 ";
@@ -109,6 +125,27 @@ Answer:
     private class GenResponse
     {
         public string Response { get; set; } = "";
+    }
+
+    private static string BuildHistorySection(IReadOnlyList<ChatTurn>? history)
+    {
+        if (history is null || history.Count == 0)
+        {
+            return "(none)";
+        }
+
+        var lines = history
+            .Where(turn => turn is not null)
+            .Select(turn =>
+            {
+                var role = string.Equals(turn.Role, "assistant", StringComparison.OrdinalIgnoreCase) ? "Assistant" : "User";
+                var content = turn.Content?.Trim();
+                return string.IsNullOrWhiteSpace(content) ? null : $"{role}: {content}";
+            })
+            .Where(line => !string.IsNullOrWhiteSpace(line))
+            .ToArray();
+
+        return lines.Length == 0 ? "(none)" : string.Join('\n', lines);
     }
 
     private async Task<string> GenerateAsync(string prompt, string generationModel, CancellationToken ct)

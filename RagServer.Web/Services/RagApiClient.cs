@@ -16,9 +16,14 @@ public sealed class RagApiClient
         _httpClient = httpClient;
     }
 
-    public async Task<AskResponse> AskAsync(string query, string? model, bool useKnowledgeBase, CancellationToken ct)
+    public async Task<AskResponse> AskAsync(
+        string query,
+        string? model,
+        bool useKnowledgeBase,
+        IReadOnlyList<ChatTurn>? history,
+        CancellationToken ct)
     {
-        var response = await _httpClient.PostAsJsonAsync("ask", new AskRequest(query, model, useKnowledgeBase), ct);
+        var response = await _httpClient.PostAsJsonAsync("ask", new AskRequest(query, model, useKnowledgeBase, history), ct);
         if (!response.IsSuccessStatusCode)
         {
             throw await CreateApiExceptionAsync(response, ct);

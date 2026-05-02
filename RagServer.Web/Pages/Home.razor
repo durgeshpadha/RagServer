@@ -134,6 +134,7 @@
 </div>
 
 @code {
+    private const int HistoryWindowSize = 10;
     private readonly List<ChatMessage> _messages = new();
     private string _query = string.Empty;
     private string _statusMessage = string.Empty;
@@ -177,7 +178,8 @@
 
         try
         {
-            var result = await ApiClient.AskAsync(userText, _selectedModel, _useKnowledgeBase, _lifetimeCts.Token);
+            var history = BuildHistoryPayload();
+            var result = await ApiClient.AskAsync(userText, _selectedModel, _useKnowledgeBase, history, _lifetimeCts.Token);
             _messages.Add(new ChatMessage(false, result.Answer, result.Citations));
         }
         catch (Exception ex)
@@ -342,5 +344,16 @@
     private sealed record ChatMessage(bool IsUser, string Text, IReadOnlyList<Citation>? Citations = null)
     {
         public IReadOnlyList<Citation> Citations { get; } = Citations ?? Array.Empty<Citation>();
+    }
+
+    private IReadOnlyList<ChatTurn> BuildHistoryPayload()
+    {
+        return _messages
+            .TakeLast(HistoryWindowSize)
+            .Select(m => new ChatTurn(
+                m.IsUser ? "user" : "assistant",
+                (m.Text ?? string.Empty).Trim()))
+            .Where(turn => !string.IsNullOrWhiteSpace(turn.Content))
+            .ToArray();
     }
 }

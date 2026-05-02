@@ -9,6 +9,7 @@ namespace RagServer.API.Controllers;
 [Route("")]
 public class RagController : ControllerBase
 {
+    private const int MaxHistoryItems = 10;
     private readonly EmbeddingService _embeddingService;
     private readonly VectorStore _vectorStore;
     private readonly RagEngine _ragEngine;
@@ -127,12 +128,13 @@ public class RagController : ControllerBase
         var selectedModel = string.IsNullOrWhiteSpace(requestedModel)
             ? ResolveDefaultModel(ragOptions, availableModels)
             : requestedModel!;
+        var history = NormalizeHistory(req.History);
 
         try
         {
             var result = req.UseKnowledgeBase
-                ? await _ragEngine.AskWithKnowledgeBaseAsync(req.Query, selectedModel, ct)
-                : await _ragEngine.AskDirectAsync(req.Query, selectedModel, ct);
+                ? await _ragEngine.AskWithKnowledgeBaseAsync(req.Query, selectedModel, history, ct)
+                : await _ragEngine.AskDirectAsync(req.Query, selectedModel, history, ct);
             return Ok(new { answer = result.Answer, citations = result.Citations });
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
@@ -418,5 +420,27 @@ public class RagController : ControllerBase
         await Response.WriteAsync($"event: {eventName}\n", ct);
         await Response.WriteAsync($"data: {json}\n\n", ct);
         await Response.Body.FlushAsync(ct);
+    }
+
+    private static IReadOnlyList<ChatTurn> NormalizeHistory(IReadOnlyList<ChatTurn>? history)
+    {
+        if (history is null || history.Count == 0)
+        {
+            return Array.Empty<ChatTurn>();
+        }
+
+        return history
+            .Where(turn => turn is not null)
+            .Select(turn =>
+            {
+                var role = string.Equals(turn.Role?.Trim(), "assistant", StringComparison.OrdinalIgnoreCase)
+                    ? "assistant"
+                    : "user";
+                var content = turn.Content?.Trim() ?? string.Empty;
+                return new ChatTurn(role, content);
+            })
+            .Where(turn => !string.IsNullOrWhiteSpace(turn.Content))
+            .TakeLast(MaxHistoryItems)
+            .ToArray();
     }
 }

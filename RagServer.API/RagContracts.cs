@@ -1,4 +1,10 @@
-public record AskRequest(string Query, string? Model = null, bool UseKnowledgeBase = true);
+public record ChatTurn(string Role, string Content);
+
+public record AskRequest(
+    string Query,
+    string? Model = null,
+    bool UseKnowledgeBase = true,
+    IReadOnlyList<ChatTurn>? History = null);
 
 public record IngestFailure(string File, string ErrorCode, string Message);
 
