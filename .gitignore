@@ -3,6 +3,7 @@
 ################################################################################
 
 /.vs
+/.dotnet-home
 /RagServer.API.Tests/bin/Debug/net10.0
 /RagServer.API.Tests/obj
 /RagServer.Web/obj

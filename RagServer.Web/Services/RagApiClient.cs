@@ -137,21 +137,21 @@ public sealed class RagApiClient
         return payload;
     }
 
-    public async Task<IngestResponse> IngestAsync(CancellationToken ct)
+    public async Task<IngestStartResponse> StartIngestAsync(CancellationToken ct)
     {
-        var response = await _httpClient.PostAsync("ingest", content: null, ct);
+        var response = await _httpClient.PostAsync("ingest/start", content: null, ct);
         if (!response.IsSuccessStatusCode)
         {
             throw await CreateApiExceptionAsync(response, ct);
         }
 
-        var result = await response.Content.ReadFromJsonAsync<IngestResponse>(cancellationToken: ct);
-        return result ?? throw new InvalidOperationException("API returned an empty ingest response.");
+        var payload = await response.Content.ReadFromJsonAsync<IngestStartResponse>(cancellationToken: ct);
+        return payload ?? throw new InvalidOperationException("API returned an empty ingest start response.");
     }
 
-    public async IAsyncEnumerable<IngestProgressEvent> StreamIngestAsync([EnumeratorCancellation] CancellationToken ct)
+    public async IAsyncEnumerable<IngestProgressEvent> StreamIngestAsync(string operationId, [EnumeratorCancellation] CancellationToken ct)
     {
-        using var request = new HttpRequestMessage(HttpMethod.Post, "ingest/stream");
+        using var request = new HttpRequestMessage(HttpMethod.Get, $"ingest/{operationId}/stream");
         using var response = await _httpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct);
         if (!response.IsSuccessStatusCode)
         {
@@ -193,6 +193,18 @@ public sealed class RagApiClient
                 }
             }
         }
+    }
+
+    public async Task<IngestCancelResponse> CancelIngestAsync(string operationId, CancellationToken ct)
+    {
+        var response = await _httpClient.PostAsync($"ingest/{operationId}/cancel", content: null, ct);
+        if (!response.IsSuccessStatusCode)
+        {
+            throw await CreateApiExceptionAsync(response, ct);
+        }
+
+        var payload = await response.Content.ReadFromJsonAsync<IngestCancelResponse>(cancellationToken: ct);
+        return payload ?? throw new InvalidOperationException("API returned an empty ingest cancel response.");
     }
 
     public async Task<int> GetDataCountAsync(CancellationToken ct)

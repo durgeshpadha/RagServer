@@ -107,7 +107,13 @@
             <article class="action-card">
                 <h3>Ingest Knowledge Base</h3>
                 <p class="helper">Reads files, creates embeddings, and stores vectors.</p>
-                <button @onclick="RunIngestAsync" disabled="@_isIngesting">@(_isIngesting ? "Ingesting..." : "Run Ingest")</button>
+                <div class="chat-actions">
+                    <button @onclick="RunIngestAsync" disabled="@_isIngesting">@(_isIngesting ? "Ingesting..." : "Run Ingest")</button>
+                    @if (_isIngesting)
+                    {
+                        <button type="button" class="stop-btn" @onclick="StopIngest">Stop ingest</button>
+                    }
+                </div>
                 @if (_isIngesting || _ingestProgressPercent > 0)
                 {
                     <div class="ingest-progress">
@@ -162,10 +168,12 @@
     private int _ingestCompletedFiles;
     private int _ingestRemainingFiles;
     private string _ingestCurrentFile = string.Empty;
+    private string? _activeIngestOperationId;
     private List<string> _availableModels = new();
     private string _selectedModel = string.Empty;
     private readonly CancellationTokenSource _lifetimeCts = new();
     private CancellationTokenSource? _askCts;
+    private CancellationTokenSource? _ingestCts;
 
     protected override async Task OnInitializedAsync()
     {
@@ -326,7 +334,10 @@
 
         try
         {
-            await foreach (var progress in ApiClient.StreamIngestAsync(_lifetimeCts.Token))
+            var start = await ApiClient.StartIngestAsync(_lifetimeCts.Token);
+            _activeIngestOperationId = start.OperationId;
+            _ingestCts = CancellationTokenSource.CreateLinkedTokenSource(_lifetimeCts.Token);
+            await foreach (var progress in ApiClient.StreamIngestAsync(start.OperationId, _ingestCts.Token))
             {
                 _ingestProgressPercent = progress.Percent;
                 _ingestTotalFiles = progress.TotalFiles;
@@ -345,11 +356,19 @@
                     _isError = true;
                     _statusMessage = progress.ErrorMessage ?? "Ingest failed.";
                 }
+                else if (string.Equals(progress.Status, "canceled", StringComparison.OrdinalIgnoreCase))
+                {
+                    _statusMessage = "Ingest stopped.";
+                }
 
                 await InvokeAsync(StateHasChanged);
             }
 
             await RefreshCountAsync();
+        }
+        catch (OperationCanceledException) when (_ingestCts?.IsCancellationRequested == true)
+        {
+            _statusMessage = "Ingest stopped.";
         }
         catch (Exception ex)
         {
@@ -358,7 +377,10 @@
         }
         finally
         {
+            _ingestCts?.Dispose();
+            _ingestCts = null;
             _isIngesting = false;
+            _activeIngestOperationId = null;
         }
     }
 
@@ -418,6 +440,8 @@
     {
         _askCts?.Cancel();
         _askCts?.Dispose();
+        _ingestCts?.Cancel();
+        _ingestCts?.Dispose();
         _lifetimeCts.Cancel();
         _lifetimeCts.Dispose();
     }
@@ -456,5 +480,22 @@
     private void StopGenerating()
     {
         _askCts?.Cancel();
+    }
+
+    private async Task StopIngest()
+    {
+        if (!string.IsNullOrWhiteSpace(_activeIngestOperationId))
+        {
+            try
+            {
+                await ApiClient.CancelIngestAsync(_activeIngestOperationId, _lifetimeCts.Token);
+            }
+            catch
+            {
+                // Fallback to local cancel if API cancel call fails.
+            }
+        }
+
+        _ingestCts?.Cancel();
     }
 }

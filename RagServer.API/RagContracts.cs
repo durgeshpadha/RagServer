@@ -25,9 +25,13 @@ public record IngestProgressEvent(
     int CompletedFiles,
     int RemainingFiles,
     int Percent,
+    string? OperationId = null,
     string? CurrentFile = null,
     IngestResponse? Summary = null,
     string? ErrorMessage = null);
+
+public record IngestStartResponse(string OperationId);
+public record IngestCancelResponse(string OperationId, string Status, string Message);
 
 public record AskStreamTokenEvent(string Text);
 public record AskStreamCompletedEvent(string Answer, IReadOnlyList<Citation> Citations);
@@ -47,4 +51,8 @@ public class RagOptions
     public int MaxContextChars { get; set; } = 8000;
     public int ChunkSizeChars { get; set; } = 1000;
     public int ChunkOverlapChars { get; set; } = 200;
+    public long MaxIngestFileBytes { get; set; } = 0;
+    public int MaxIngestFileChars { get; set; } = 0;
+    public int IngestMaxParallelFiles { get; set; } = 2;
+    public int IngestMaxParallelEmbeddingsPerFile { get; set; } = 2;
 }

@@ -1,6 +1,7 @@
 @RagServer.Api_HostAddress = http://localhost:5228
 
 ### Ingest files from the configured KnowledgeBasePath
+# Note: ingestion skips dot-prefixed folders recursively and excludes .yaml/.yml files.
 POST {{RagServer.Api_HostAddress}}/ingest
 Accept: application/json
 
@@ -58,6 +59,25 @@ Accept: application/json
 ### Stream ingest progress events (SSE)
 POST {{RagServer.Api_HostAddress}}/ingest/stream
 Accept: text/event-stream
+
+###
+
+### Start ingest operation
+POST {{RagServer.Api_HostAddress}}/ingest/start
+Accept: application/json
+
+###
+
+@operationId = replace-with-operation-id
+### Stream ingest by operation id
+GET {{RagServer.Api_HostAddress}}/ingest/{{operationId}}/stream
+Accept: text/event-stream
+
+###
+
+### Cancel ingest by operation id
+POST {{RagServer.Api_HostAddress}}/ingest/{{operationId}}/cancel
+Accept: application/json
 
 ###
 

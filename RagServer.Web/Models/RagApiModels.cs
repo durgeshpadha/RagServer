@@ -37,9 +37,13 @@ public sealed record IngestProgressEvent(
     int CompletedFiles,
     int RemainingFiles,
     int Percent,
+    string? OperationId = null,
     string? CurrentFile = null,
     IngestResponse? Summary = null,
     string? ErrorMessage = null);
+
+public sealed record IngestStartResponse(string OperationId);
+public sealed record IngestCancelResponse(string OperationId, string Status, string Message);
 
 public sealed record AskStreamTokenEvent(string Text);
 public sealed record AskStreamCompletedEvent(string Answer, IReadOnlyList<Citation> Citations);

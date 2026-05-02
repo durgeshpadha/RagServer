@@ -66,6 +66,7 @@ builder.Services.AddHttpClient("ollama-generate", http =>
     http.Timeout = TimeSpan.FromSeconds(60);
 });
 builder.Services.AddSingleton<VectorStore>();
+builder.Services.AddSingleton<IngestOperationRegistry>();
 builder.Services.AddSingleton<RagEngine>(sp =>
 {
     var embed = sp.GetRequiredService<EmbeddingService>();

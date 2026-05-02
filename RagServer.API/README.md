@@ -6,6 +6,9 @@ Minimal-dependency RAG API in C# using local files + Ollama.
 
 - `POST /ingest`: reads files from `Rag:KnowledgeBasePath`, chunks, embeds, and stores vectors.
 - `POST /ingest/stream`: streams ingest progress events (SSE) and final summary.
+- `POST /ingest/start`: creates a new ingest operation and returns `operationId`.
+- `GET /ingest/{operationId}/stream`: streams progress for a started operation.
+- `POST /ingest/{operationId}/cancel`: requests server-side cancellation.
 - `POST /ask`: answers with or without retrieval depending on `useKnowledgeBase`.
 - `POST /ask/stream`: streams token chunks (SSE) and emits final answer + citations.
 - `GET /models`: returns configured chat models and default model.
@@ -34,6 +37,14 @@ Minimal-dependency RAG API in C# using local files + Ollama.
 - `MaxContextChars`: max context characters sent to generation model.
 - `ChunkSizeChars`: chunk size for ingestion.
 - `ChunkOverlapChars`: overlap between chunks.
+- `IngestMaxParallelFiles`: max files processed concurrently during ingest (clamped to `1..8`).
+- `IngestMaxParallelEmbeddingsPerFile`: max concurrent embedding calls per file (clamped to `1..8`).
+- `MaxIngestFileBytes`: skip files larger than this byte size (`0` disables limit).
+- `MaxIngestFileChars`: trim file text to this many chars before chunking (`0` disables limit).
+- Ingest discovery excludes directories whose name starts with `.` (recursive).
+- Ingest discovery excludes `.yaml` and `.yml` files.
+
+Recommended starting values for laptops: `IngestMaxParallelFiles = 2`, `IngestMaxParallelEmbeddingsPerFile = 2`.
 
 ## Reliability behavior
 

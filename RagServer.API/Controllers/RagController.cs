@@ -1,5 +1,6 @@
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Options;
+using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
@@ -14,14 +15,17 @@ public class RagController : ControllerBase
     private readonly EmbeddingService _embeddingService;
     private readonly VectorStore _vectorStore;
     private readonly RagEngine _ragEngine;
+    private readonly IngestOperationRegistry _ingestRegistry;
     private readonly IOptions<RagOptions> _options;
     private readonly IWebHostEnvironment _environment;
     private readonly ILogger<RagController> _logger;
+    private readonly Lock _vectorStoreMutationLock = new();
 
     public RagController(
         EmbeddingService embeddingService,
         VectorStore vectorStore,
         RagEngine ragEngine,
+        IngestOperationRegistry ingestRegistry,
         IOptions<RagOptions> options,
         IWebHostEnvironment environment,
         ILogger<RagController> logger)
@@ -29,6 +33,7 @@ public class RagController : ControllerBase
         _embeddingService = embeddingService;
         _vectorStore = vectorStore;
         _ragEngine = ragEngine;
+        _ingestRegistry = ingestRegistry;
         _options = options;
         _environment = environment;
         _logger = logger;
@@ -44,31 +49,126 @@ public class RagController : ControllerBase
     [HttpPost("ingest")]
     public async Task<ActionResult<IngestResponse>> Ingest(CancellationToken ct)
     {
+        if (!_ingestRegistry.TryStart(out var operation, out var conflict))
+        {
+            return Conflict(new ErrorResponse("ingest_already_running", $"Ingest already running. OperationId: {conflict!.OperationId}"));
+        }
+
+        if (!_ingestRegistry.TryMarkRunning(operation))
+        {
+            return Conflict(new ErrorResponse("ingest_not_startable", "Ingest operation could not be started."));
+        }
+
+        using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(ct, operation.Cancellation.Token);
         try
         {
-            var result = await RunIngestAsync(progressCallback: null, ct);
+            var result = await RunIngestAsync(operation.OperationId, progressCallback: null, linkedCts.Token);
+            _ingestRegistry.MarkCompleted(operation, result);
             return Ok(result);
+        }
+        catch (OperationCanceledException)
+        {
+            _ingestRegistry.MarkCanceled(operation);
+            return Conflict(new ErrorResponse("ingest_canceled", "Ingest was canceled."));
         }
         catch (InvalidOperationException ex) when (ex.Message.Contains("Knowledge base directory not found.", StringComparison.Ordinal))
         {
+            _ingestRegistry.MarkFailed(operation, ex.Message);
             return BadRequest(new ErrorResponse("knowledge_base_not_found", "Knowledge base directory not found."));
+        }
+        catch (Exception ex)
+        {
+            _ingestRegistry.MarkFailed(operation, ex.Message);
+            throw;
         }
     }
 
-    [HttpPost("ingest/stream")]
-    public async Task IngestStream(CancellationToken ct)
+    [HttpPost("ingest/start")]
+    public ActionResult<IngestStartResponse> IngestStart()
     {
+        if (!_ingestRegistry.TryStart(out var operation, out var conflict))
+        {
+            return Conflict(new ErrorResponse("ingest_already_running", $"Ingest already running. OperationId: {conflict!.OperationId}"));
+        }
+
+        return Ok(new IngestStartResponse(operation.OperationId));
+    }
+
+    [HttpPost("ingest/{operationId}/cancel")]
+    public ActionResult<IngestCancelResponse> IngestCancel(string operationId)
+    {
+        if (!_ingestRegistry.TryCancel(operationId, out var operation) || operation is null)
+        {
+            return NotFound(new ErrorResponse("ingest_not_found", "Ingest operation not found."));
+        }
+
+        if (operation.Status is IngestOperationStatus.Completed or IngestOperationStatus.Canceled or IngestOperationStatus.Failed)
+        {
+            return Conflict(new ErrorResponse("ingest_not_running", $"Operation is already {operation.Status.ToString().ToLowerInvariant()}."));
+        }
+
+        return Ok(new IngestCancelResponse(operation.OperationId, operation.Status.ToString().ToLowerInvariant(), "Cancellation requested."));
+    }
+
+    [HttpGet("ingest/{operationId}/stream")]
+    public async Task IngestOperationStream(string operationId, CancellationToken ct)
+    {
+        if (!_ingestRegistry.TryGet(operationId, out var operation))
+        {
+            Response.StatusCode = StatusCodes.Status404NotFound;
+            await Response.WriteAsJsonAsync(new ErrorResponse("ingest_not_found", "Ingest operation not found."), ct);
+            return;
+        }
+
         Response.StatusCode = StatusCodes.Status200OK;
         Response.ContentType = "text/event-stream";
         Response.Headers.CacheControl = "no-cache";
         Response.Headers.Append("X-Accel-Buffering", "no");
 
+        if (operation.Status == IngestOperationStatus.Completed && operation.Summary is not null)
+        {
+            var completed = new IngestProgressEvent(
+                "completed",
+                operation.Summary.FilesScanned,
+                operation.Summary.FilesScanned,
+                0,
+                100,
+                operation.OperationId,
+                Summary: operation.Summary);
+            await WriteSseEventAsync("completed", completed, ct);
+            return;
+        }
+
+        if (operation.Status == IngestOperationStatus.Canceled)
+        {
+            var canceled = new IngestProgressEvent("canceled", 0, 0, 0, 0, operation.OperationId, ErrorMessage: "Ingest was canceled.");
+            await WriteSseEventAsync("canceled", canceled, ct);
+            return;
+        }
+
+        if (operation.Status == IngestOperationStatus.Failed)
+        {
+            var failed = new IngestProgressEvent("error", 0, 0, 0, 0, operation.OperationId, ErrorMessage: operation.ErrorMessage ?? "Ingest failed.");
+            await WriteSseEventAsync("error", failed, ct);
+            return;
+        }
+
+        if (!_ingestRegistry.TryMarkRunning(operation))
+        {
+            Response.StatusCode = StatusCodes.Status409Conflict;
+            await Response.WriteAsJsonAsync(new ErrorResponse("ingest_not_startable", $"Operation is {operation.Status.ToString().ToLowerInvariant()}."), ct);
+            return;
+        }
+
+        using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(ct, operation.Cancellation.Token);
         try
         {
-            var summary = await RunIngestAsync(async progress =>
+            var summary = await RunIngestAsync(operation.OperationId, async progress =>
             {
                 await WriteSseEventAsync("progress", progress, ct);
-            }, ct);
+            }, linkedCts.Token);
+
+            _ingestRegistry.MarkCompleted(operation, summary);
 
             var completed = new IngestProgressEvent(
                 "completed",
@@ -76,20 +176,37 @@ public class RagController : ControllerBase
                 summary.FilesScanned,
                 0,
                 100,
+                operation.OperationId,
                 Summary: summary);
 
             await WriteSseEventAsync("completed", completed, ct);
         }
-        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        catch (OperationCanceledException)
         {
-            // Client disconnected/cancelled; no extra write needed.
+            _ingestRegistry.MarkCanceled(operation);
+            var canceled = new IngestProgressEvent("canceled", 0, 0, 0, 0, operation.OperationId, ErrorMessage: "Ingest was canceled.");
+            await WriteSseEventAsync("canceled", canceled, CancellationToken.None);
         }
         catch (Exception ex)
         {
+            _ingestRegistry.MarkFailed(operation, ex.Message);
             _logger.LogError(ex, "Unhandled error during ingest stream.");
-            var errorEvent = new IngestProgressEvent("error", 0, 0, 0, 0, ErrorMessage: ex.Message);
+            var errorEvent = new IngestProgressEvent("error", 0, 0, 0, 0, operation.OperationId, ErrorMessage: ex.Message);
             await WriteSseEventAsync("error", errorEvent, CancellationToken.None);
         }
+    }
+
+    [HttpPost("ingest/stream")]
+    public async Task IngestStream(CancellationToken ct)
+    {
+        if (!_ingestRegistry.TryStart(out var operation, out var conflict))
+        {
+            Response.StatusCode = StatusCodes.Status409Conflict;
+            await Response.WriteAsJsonAsync(new ErrorResponse("ingest_already_running", $"Ingest already running. OperationId: {conflict!.OperationId}"), ct);
+            return;
+        }
+
+        await IngestOperationStream(operation.OperationId, ct);
     }
 
     /// <summary>
@@ -360,14 +477,16 @@ public class RagController : ControllerBase
         }
     }
 
-    private async Task<IngestResponse> RunIngestAsync(Func<IngestProgressEvent, Task>? progressCallback, CancellationToken ct)
+    private async Task<IngestResponse> RunIngestAsync(string operationId, Func<IngestProgressEvent, Task>? progressCallback, CancellationToken ct)
     {
         var sw = Stopwatch.StartNew();
         var ragOptions = _options.Value;
+        var maxParallelFiles = ClampConcurrency(ragOptions.IngestMaxParallelFiles, defaultValue: 2);
+        var maxParallelEmbeddingsPerFile = ClampConcurrency(ragOptions.IngestMaxParallelEmbeddingsPerFile, defaultValue: 2);
 
         var allowedExtensions = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
         {
-            ".md", ".txt", ".cs", ".js", ".ts", ".json", ".yml", ".yaml", ".html", ".razor"
+            ".md", ".txt", ".cs", ".js", ".ts", ".json", ".html", ".razor"
         };
 
         var configuredRoot = ragOptions.KnowledgeBasePath;
@@ -380,15 +499,12 @@ public class RagController : ControllerBase
             throw new InvalidOperationException("Knowledge base directory not found.");
         }
 
-        var files = Directory.GetFiles(root, "*.*", SearchOption.AllDirectories)
-            .Where(f => allowedExtensions.Contains(Path.GetExtension(f)))
-            .ToArray();
-
-        var failures = new List<IngestFailure>();
+        var files = EnumerateIngestFiles(root, allowedExtensions).ToArray();
+        var totalFiles = files.Length;
+        var failures = new ConcurrentBag<IngestFailure>();
         var indexedFiles = 0;
         var chunksAdded = 0;
         var completedFiles = 0;
-        var totalFiles = files.Length;
 
         if (progressCallback is not null)
         {
@@ -397,110 +513,186 @@ public class RagController : ControllerBase
                 totalFiles,
                 0,
                 totalFiles,
-                totalFiles == 0 ? 100 : 0));
+                totalFiles == 0 ? 100 : 0,
+                operationId));
         }
 
-        foreach (var file in files)
-        {
-            ct.ThrowIfCancellationRequested();
-            var displayFile = GetSafeFileDisplay(root, file);
-            var status = "indexed";
-
-            try
+        await Parallel.ForEachAsync(
+            files,
+            new ParallelOptions
             {
-                var text = await System.IO.File.ReadAllTextAsync(file, ct);
-                text = text.Replace("\r\n", "\n").Trim();
-                if (string.IsNullOrWhiteSpace(text))
+                CancellationToken = ct,
+                MaxDegreeOfParallelism = maxParallelFiles
+            },
+            async (file, token) =>
+            {
+                var fileResult = await ProcessFileAsync(
+                    file,
+                    root,
+                    ragOptions,
+                    maxParallelEmbeddingsPerFile,
+                    token);
+
+                if (fileResult.Indexed)
                 {
-                    status = "skipped";
-                    continue;
+                    Interlocked.Increment(ref indexedFiles);
+                    Interlocked.Add(ref chunksAdded, fileResult.ChunksAdded);
                 }
 
-                var chunks = SplitIntoChunks(text, ragOptions.ChunkSizeChars, ragOptions.ChunkOverlapChars).ToArray();
-                var newRecords = new List<DocumentRecord>(chunks.Length);
-
-                for (int i = 0; i < chunks.Length; i++)
+                if (fileResult.Failure is not null)
                 {
-                    var normalizedChunk = EmbeddingService.NormalizeForEmbedding(chunks[i]);
-                    if (string.IsNullOrWhiteSpace(normalizedChunk))
-                    {
-                        continue;
-                    }
-
-                    var embedding = await _embeddingService.EmbedAsync(normalizedChunk, ct);
-                    newRecords.Add(new DocumentRecord
-                    {
-                        Id = $"{file}::chunk-{i}",
-                        Source = file,
-                        ChunkIndex = i,
-                        Text = chunks[i],
-                        Embedding = embedding
-                    });
+                    failures.Add(fileResult.Failure);
                 }
 
-                _vectorStore.RemoveBySource(file);
-                _vectorStore.AddRange(newRecords);
-
-                indexedFiles++;
-                chunksAdded += newRecords.Count;
-            }
-            catch (OperationCanceledException)
-            {
-                throw;
-            }
-            catch (OllamaTimeoutException ex)
-            {
-                status = "failed";
-                _logger.LogWarning(ex, "Embedding timeout for {File}", displayFile);
-                failures.Add(new IngestFailure(displayFile, "embedding_timeout", "Embedding request timed out."));
-            }
-            catch (OllamaRequestException ex)
-            {
-                status = "failed";
-                _logger.LogWarning(ex, "Embedding request failed for {File}", displayFile);
-                failures.Add(new IngestFailure(displayFile, "embedding_unavailable", "Embedding service unavailable."));
-            }
-            catch (OllamaResponseException ex)
-            {
-                status = "failed";
-                _logger.LogWarning(ex, "Embedding response invalid for {File}", displayFile);
-                failures.Add(new IngestFailure(displayFile, "embedding_bad_response", "Embedding service returned an invalid response."));
-            }
-            catch (Exception ex)
-            {
-                status = "failed";
-                _logger.LogWarning(ex, "Ingest failed for {File}", displayFile);
-                failures.Add(new IngestFailure(displayFile, "ingest_failed", "Failed to ingest file."));
-            }
-            finally
-            {
-                completedFiles++;
+                var completed = Interlocked.Increment(ref completedFiles);
                 if (progressCallback is not null)
                 {
-                    var remaining = Math.Max(0, totalFiles - completedFiles);
-                    var percent = totalFiles == 0 ? 100 : (int)Math.Round((completedFiles * 100d) / totalFiles);
+                    var remaining = Math.Max(0, totalFiles - completed);
+                    var percent = totalFiles == 0 ? 100 : (int)Math.Round((completed * 100d) / totalFiles);
                     await progressCallback(new IngestProgressEvent(
-                        status,
+                        fileResult.Status,
                         totalFiles,
-                        completedFiles,
+                        completed,
                         remaining,
                         percent,
-                        displayFile));
+                        operationId,
+                        fileResult.DisplayFile));
                 }
-            }
-        }
+            });
 
         _vectorStore.Save();
         sw.Stop();
 
         return new IngestResponse(
             "Ingestion complete",
-            files.Length,
+            totalFiles,
             indexedFiles,
             chunksAdded,
-            failures,
+            failures.ToArray(),
             _vectorStore.Documents.Count,
             sw.ElapsedMilliseconds);
+    }
+
+    private async Task<IngestFileResult> ProcessFileAsync(
+        string file,
+        string root,
+        RagOptions ragOptions,
+        int maxParallelEmbeddingsPerFile,
+        CancellationToken ct)
+    {
+        ct.ThrowIfCancellationRequested();
+        var displayFile = GetSafeFileDisplay(root, file);
+        var status = "indexed";
+
+        try
+        {
+            if (ragOptions.MaxIngestFileBytes > 0)
+            {
+                var fileSize = new FileInfo(file).Length;
+                if (fileSize > ragOptions.MaxIngestFileBytes)
+                {
+                    status = "skipped";
+                    return new IngestFileResult(
+                        displayFile,
+                        status,
+                        Indexed: false,
+                        ChunksAdded: 0,
+                        Failure: new IngestFailure(displayFile, "file_too_large", $"File exceeds max size of {ragOptions.MaxIngestFileBytes} bytes."));
+                }
+            }
+
+            var text = await System.IO.File.ReadAllTextAsync(file, ct);
+            if (ragOptions.MaxIngestFileChars > 0 && text.Length > ragOptions.MaxIngestFileChars)
+            {
+                text = text[..ragOptions.MaxIngestFileChars];
+            }
+
+            text = text.Replace("\r\n", "\n").Trim();
+            if (string.IsNullOrWhiteSpace(text))
+            {
+                return new IngestFileResult(displayFile, "skipped", Indexed: false, ChunksAdded: 0, Failure: null);
+            }
+
+            var newRecords = new ConcurrentBag<DocumentRecord>();
+            using var semaphore = new SemaphoreSlim(maxParallelEmbeddingsPerFile);
+            var embeddingTasks = new List<Task>();
+            var chunkIndex = 0;
+
+            foreach (var chunk in SplitIntoChunks(text, ragOptions.ChunkSizeChars, ragOptions.ChunkOverlapChars))
+            {
+                var localChunkIndex = chunkIndex;
+                var localChunk = chunk;
+                chunkIndex++;
+
+                var normalizedChunk = EmbeddingService.NormalizeForEmbedding(localChunk);
+                if (string.IsNullOrWhiteSpace(normalizedChunk))
+                {
+                    continue;
+                }
+
+                embeddingTasks.Add(Task.Run(async () =>
+                {
+                    await semaphore.WaitAsync(ct);
+                    try
+                    {
+                        var embedding = await _embeddingService.EmbedAsync(normalizedChunk, ct);
+                        newRecords.Add(new DocumentRecord
+                        {
+                            Id = $"{file}::chunk-{localChunkIndex}",
+                            Source = file,
+                            ChunkIndex = localChunkIndex,
+                            Text = localChunk,
+                            Embedding = embedding
+                        });
+                    }
+                    finally
+                    {
+                        semaphore.Release();
+                    }
+                }, ct));
+            }
+
+            await Task.WhenAll(embeddingTasks);
+
+            var orderedRecords = newRecords.OrderBy(r => r.ChunkIndex).ToArray();
+            lock (_vectorStoreMutationLock)
+            {
+                _vectorStore.RemoveBySource(file);
+                _vectorStore.AddRange(orderedRecords);
+            }
+
+            return new IngestFileResult(displayFile, status, Indexed: true, ChunksAdded: orderedRecords.Length, Failure: null);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (OllamaTimeoutException ex)
+        {
+            _logger.LogWarning(ex, "Embedding timeout for {File}", displayFile);
+            return new IngestFileResult(displayFile, "failed", Indexed: false, ChunksAdded: 0, Failure: new IngestFailure(displayFile, "embedding_timeout", "Embedding request timed out."));
+        }
+        catch (OllamaRequestException ex)
+        {
+            _logger.LogWarning(ex, "Embedding request failed for {File}", displayFile);
+            return new IngestFileResult(displayFile, "failed", Indexed: false, ChunksAdded: 0, Failure: new IngestFailure(displayFile, "embedding_unavailable", "Embedding service unavailable."));
+        }
+        catch (OllamaResponseException ex)
+        {
+            _logger.LogWarning(ex, "Embedding response invalid for {File}", displayFile);
+            return new IngestFileResult(displayFile, "failed", Indexed: false, ChunksAdded: 0, Failure: new IngestFailure(displayFile, "embedding_bad_response", "Embedding service returned an invalid response."));
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Ingest failed for {File}", displayFile);
+            return new IngestFileResult(displayFile, "failed", Indexed: false, ChunksAdded: 0, Failure: new IngestFailure(displayFile, "ingest_failed", "Failed to ingest file."));
+        }
+    }
+
+    private static int ClampConcurrency(int configuredValue, int defaultValue)
+    {
+        var value = configuredValue <= 0 ? defaultValue : configuredValue;
+        return Math.Clamp(value, 1, 8);
     }
 
     private async Task WriteSseEventAsync(string eventName, IngestProgressEvent payload, CancellationToken ct)
@@ -509,6 +701,36 @@ public class RagController : ControllerBase
         await Response.WriteAsync($"event: {eventName}\n", ct);
         await Response.WriteAsync($"data: {json}\n\n", ct);
         await Response.Body.FlushAsync(ct);
+    }
+
+    private static IEnumerable<string> EnumerateIngestFiles(string root, IReadOnlySet<string> allowedExtensions)
+    {
+        return EnumerateIngestFilesCore(root, allowedExtensions);
+    }
+
+    private static IEnumerable<string> EnumerateIngestFilesCore(string currentDirectory, IReadOnlySet<string> allowedExtensions)
+    {
+        foreach (var file in Directory.EnumerateFiles(currentDirectory, "*.*", SearchOption.TopDirectoryOnly))
+        {
+            if (allowedExtensions.Contains(Path.GetExtension(file)))
+            {
+                yield return file;
+            }
+        }
+
+        foreach (var directory in Directory.EnumerateDirectories(currentDirectory, "*", SearchOption.TopDirectoryOnly))
+        {
+            var directoryName = Path.GetFileName(directory);
+            if (directoryName.StartsWith(".", StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            foreach (var file in EnumerateIngestFilesCore(directory, allowedExtensions))
+            {
+                yield return file;
+            }
+        }
     }
 
     private async Task WriteAskSseEventAsync<T>(string eventName, T payload, CancellationToken ct)
@@ -540,4 +762,11 @@ public class RagController : ControllerBase
             .TakeLast(MaxHistoryItems)
             .ToArray();
     }
+
+    private sealed record IngestFileResult(
+        string DisplayFile,
+        string Status,
+        bool Indexed,
+        int ChunksAdded,
+        IngestFailure? Failure);
 }

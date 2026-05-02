@@ -13,6 +13,48 @@ namespace RagServer.Api.Tests;
 public class RagControllerTests
 {
     [Fact]
+    public void IngestStart_WhenRunning_Returns409()
+    {
+        var setup = CreateControllerSetup(addKnowledgeBaseDocument: false);
+        var first = setup.Controller.IngestStart();
+        Assert.IsType<OkObjectResult>(first.Result);
+
+        var second = setup.Controller.IngestStart();
+        Assert.IsType<ConflictObjectResult>(second.Result);
+    }
+
+    [Fact]
+    public void IngestCancel_UnknownOperation_Returns404()
+    {
+        var setup = CreateControllerSetup(addKnowledgeBaseDocument: false);
+        var result = setup.Controller.IngestCancel("missing-op");
+        Assert.IsType<NotFoundObjectResult>(result.Result);
+    }
+
+    [Fact]
+    public void IngestCancel_CompletedOperation_Returns409()
+    {
+        var setup = CreateControllerSetup(addKnowledgeBaseDocument: false);
+
+        var start = setup.Controller.IngestStart();
+        var ok = Assert.IsType<OkObjectResult>(start.Result);
+        var startPayload = Assert.IsType<IngestStartResponse>(ok.Value);
+
+        Assert.True(setup.Registry.TryGet(startPayload.OperationId, out var operation));
+        setup.Registry.MarkCompleted(operation!, new IngestResponse(
+            Message: "Ingestion complete",
+            FilesScanned: 0,
+            FilesIndexed: 0,
+            ChunksAdded: 0,
+            Failures: Array.Empty<IngestFailure>(),
+            TotalStored: 0,
+            DurationMs: 0));
+
+        var cancel = setup.Controller.IngestCancel(startPayload.OperationId);
+        Assert.IsType<ConflictObjectResult>(cancel.Result);
+    }
+
+    [Fact]
     public async Task Ask_UseKnowledgeBaseFalse_BypassesEmbedding_AndReturnsNoCitations()
     {
         var setup = CreateControllerSetup(addKnowledgeBaseDocument: false);
@@ -150,13 +192,57 @@ public class RagControllerTests
             .Select(line => line["data:".Length..].Trim())
             .ToList();
 
+        var progressEvents = new List<int>();
+        foreach (var json in jsonPayloads)
+        {
+            using var doc = JsonDocument.Parse(json);
+            if (doc.RootElement.TryGetProperty("Status", out var statusEl)
+                && string.Equals(statusEl.GetString(), "indexed", StringComparison.OrdinalIgnoreCase))
+            {
+                progressEvents.Add(doc.RootElement.GetProperty("CompletedFiles").GetInt32());
+            }
+        }
+
         Assert.Contains(jsonPayloads, json =>
         {
             using var doc = JsonDocument.Parse(json);
             return doc.RootElement.TryGetProperty("Percent", out var percentEl)
                 && percentEl.GetInt32() == 100;
         });
+        Assert.True(progressEvents.SequenceEqual(progressEvents.OrderBy(v => v)));
         Assert.True(setup.Handler.EmbedCalls > 0);
+    }
+
+    [Fact]
+    public async Task Ingest_ExcludesDotFolders_AndYamlFiles()
+    {
+        var setup = CreateControllerSetup(addKnowledgeBaseDocument: false, configureKnowledgeBase: kbPath =>
+        {
+            File.WriteAllText(Path.Combine(kbPath, "keep.md"), "keep");
+            File.WriteAllText(Path.Combine(kbPath, "skip.yaml"), "skip");
+            File.WriteAllText(Path.Combine(kbPath, "skip.yml"), "skip");
+
+            var docs = Path.Combine(kbPath, "docs");
+            Directory.CreateDirectory(docs);
+            File.WriteAllText(Path.Combine(docs, "keep.txt"), "keep");
+            File.WriteAllText(Path.Combine(docs, "skip.yaml"), "skip");
+
+            var hidden = Path.Combine(kbPath, ".github");
+            Directory.CreateDirectory(hidden);
+            File.WriteAllText(Path.Combine(hidden, "hidden.md"), "hidden");
+
+            var nestedHidden = Path.Combine(docs, ".cache");
+            Directory.CreateDirectory(nestedHidden);
+            File.WriteAllText(Path.Combine(nestedHidden, "nested-hidden.cs"), "hidden");
+        });
+
+        var result = await setup.Controller.Ingest(CancellationToken.None);
+        var ok = Assert.IsType<OkObjectResult>(result.Result);
+        var response = Assert.IsType<IngestResponse>(ok.Value);
+
+        Assert.Equal(2, response.FilesScanned);
+        Assert.Equal(2, response.FilesIndexed);
+        Assert.Empty(response.Failures);
     }
 
     [Fact]
@@ -248,7 +334,10 @@ public class RagControllerTests
         Assert.Contains("event: error", payload, StringComparison.Ordinal);
     }
 
-    private static ControllerSetup CreateControllerSetup(bool addKnowledgeBaseDocument)
+    private static ControllerSetup CreateControllerSetup(
+        bool addKnowledgeBaseDocument,
+        Action<string>? configureKnowledgeBase = null,
+        Action<RagOptions>? configureOptions = null)
     {
         var root = CreateTempRoot();
         var kbPath = Path.Combine(root, "kb");
@@ -258,6 +347,8 @@ public class RagControllerTests
         {
             File.WriteAllText(Path.Combine(kbPath, "sample.txt"), "This is a sample knowledge base document.");
         }
+
+        configureKnowledgeBase?.Invoke(kbPath);
 
         var env = new TestWebHostEnvironment(root);
         var options = new RagOptions
@@ -269,8 +360,11 @@ public class RagControllerTests
             GenerationModel = "deepseek-coder-v2:16b",
             GenerationModels = new[] { "deepseek-coder-v2:16b", "qwen2.5-coder:14b" },
             TopK = 5,
-            MaxContextChars = 4000
+            MaxContextChars = 4000,
+            IngestMaxParallelFiles = 2,
+            IngestMaxParallelEmbeddingsPerFile = 2
         };
+        configureOptions?.Invoke(options);
 
         var optionsWrapper = Options.Create(options);
         var handler = new TrackingOllamaHandler();
@@ -289,15 +383,17 @@ public class RagControllerTests
             });
         }
         var ragEngine = new RagEngine(embeddingService, vectorStore, httpClient, optionsWrapper);
+        var registry = new IngestOperationRegistry();
         var controller = new RagController(
             embeddingService,
             vectorStore,
             ragEngine,
+            registry,
             optionsWrapper,
             env,
             NullLogger<RagController>.Instance);
 
-        return new ControllerSetup(controller, handler, options);
+        return new ControllerSetup(controller, handler, options, registry);
     }
 
     private static string CreateTempRoot()
@@ -307,7 +403,11 @@ public class RagControllerTests
         return root;
     }
 
-    private sealed record ControllerSetup(RagController Controller, TrackingOllamaHandler Handler, RagOptions Options);
+    private sealed record ControllerSetup(
+        RagController Controller,
+        TrackingOllamaHandler Handler,
+        RagOptions Options,
+        IngestOperationRegistry Registry);
 
     private static async Task<string> InvokeAskStreamAsync(RagController controller, AskRequest request)
     {
