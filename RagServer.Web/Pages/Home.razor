@@ -134,7 +134,7 @@
                         <p class="helper">@_ingestProgressPercent% · @_ingestCompletedFiles / @_ingestTotalFiles files · Remaining: @_ingestRemainingFiles</p>
                         @if (!string.IsNullOrWhiteSpace(_ingestCurrentFile))
                         {
-                            <p class="helper">Current: <code>@_ingestCurrentFile</code></p>
+                            <p class="helper ingest-current-file">Current: <code class="ingest-file-name">@_ingestCurrentFile</code></p>
                         }
                     </div>
                 }

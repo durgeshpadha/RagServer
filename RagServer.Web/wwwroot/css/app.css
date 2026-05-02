@@ -99,6 +99,7 @@ h1, h2, h3 {
     border-radius: 18px;
     box-shadow: var(--shadow);
     padding: 1rem;
+    min-width: 0;
 }
 
 .panel-head p {
@@ -342,6 +343,7 @@ button:disabled {
     border: 1px solid #e4ecea;
     border-radius: 14px;
     padding: 0.8rem;
+    min-width: 0;
 }
 
 .stat {
@@ -353,6 +355,18 @@ button:disabled {
 .helper {
     color: var(--muted);
     margin: 0.3rem 0 0.7rem;
+}
+
+.ingest-current-file {
+    min-width: 0;
+}
+
+.ingest-file-name {
+    display: inline-block;
+    max-width: 100%;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    word-break: break-word;
 }
 
 .ingest-progress {
