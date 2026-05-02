@@ -1,6 +1,7 @@
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Options;
 using System.Diagnostics;
+using System.Text;
 using System.Text.Json;
 
 namespace RagServer.API.Controllers;
@@ -155,6 +156,94 @@ public class RagController : ControllerBase
         {
             _logger.LogWarning(ex, "Generation response invalid for /ask request.");
             return StatusCode(StatusCodes.Status502BadGateway);
+        }
+    }
+
+    [HttpPost("ask/stream")]
+    public async Task AskStream([FromBody] AskRequest req, CancellationToken ct)
+    {
+        var ragOptions = _options.Value;
+
+        if (req is null || string.IsNullOrWhiteSpace(req.Query))
+        {
+            Response.StatusCode = StatusCodes.Status400BadRequest;
+            await Response.WriteAsJsonAsync(new ErrorResponse("invalid_query", "Query is required."), ct);
+            return;
+        }
+
+        if (req.Query.Length > ragOptions.MaxQueryChars)
+        {
+            Response.StatusCode = StatusCodes.Status400BadRequest;
+            await Response.WriteAsJsonAsync(new ErrorResponse("query_too_large", $"Query must be <= {ragOptions.MaxQueryChars} characters."), ct);
+            return;
+        }
+
+        var availableModels = GetAvailableGenerationModels(ragOptions);
+        var requestedModel = req.Model?.Trim();
+        if (!string.IsNullOrWhiteSpace(requestedModel) &&
+            !availableModels.Contains(requestedModel, StringComparer.OrdinalIgnoreCase))
+        {
+            Response.StatusCode = StatusCodes.Status400BadRequest;
+            await Response.WriteAsJsonAsync(new ErrorResponse("invalid_model", "Requested model is not in the configured model list."), ct);
+            return;
+        }
+
+        var selectedModel = string.IsNullOrWhiteSpace(requestedModel)
+            ? ResolveDefaultModel(ragOptions, availableModels)
+            : requestedModel!;
+        var history = NormalizeHistory(req.History);
+
+        Response.StatusCode = StatusCodes.Status200OK;
+        Response.ContentType = "text/event-stream";
+        Response.Headers.CacheControl = "no-cache";
+        Response.Headers.Append("X-Accel-Buffering", "no");
+
+        try
+        {
+            RagEngine.AskPreparation prepared;
+            if (req.UseKnowledgeBase)
+            {
+                prepared = await _ragEngine.PrepareWithKnowledgeBaseAsync(req.Query, history, ct);
+            }
+            else
+            {
+                prepared = _ragEngine.PrepareDirect(req.Query, history);
+            }
+
+            if (prepared.ShortCircuitResult is not null)
+            {
+                var shortCircuit = new AskStreamCompletedEvent(prepared.ShortCircuitResult.Answer, prepared.ShortCircuitResult.Citations);
+                await WriteAskSseEventAsync("completed", shortCircuit, ct);
+                return;
+            }
+
+            var full = new StringBuilder();
+            await foreach (var token in _ragEngine.StreamGenerateAsync(prepared.Prompt, selectedModel, ct))
+            {
+                full.Append(token);
+                await WriteAskSseEventAsync("token", new AskStreamTokenEvent(token), ct);
+            }
+
+            await WriteAskSseEventAsync("completed", new AskStreamCompletedEvent(full.ToString(), prepared.Citations), ct);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            // client disconnected/cancelled
+        }
+        catch (OllamaTimeoutException ex)
+        {
+            _logger.LogWarning(ex, "Generation timed out for /ask/stream request.");
+            await WriteAskSseEventAsync("error", new AskStreamErrorEvent("Generation timed out.", "timeout"), CancellationToken.None);
+        }
+        catch (OllamaRequestException ex)
+        {
+            _logger.LogWarning(ex, "Generation request failed for /ask/stream request.");
+            await WriteAskSseEventAsync("error", new AskStreamErrorEvent("Generation service unavailable.", "service_unavailable"), CancellationToken.None);
+        }
+        catch (OllamaResponseException ex)
+        {
+            _logger.LogWarning(ex, "Generation response invalid for /ask/stream request.");
+            await WriteAskSseEventAsync("error", new AskStreamErrorEvent("Generation service returned invalid response.", "bad_response"), CancellationToken.None);
         }
     }
 
@@ -415,6 +504,14 @@ public class RagController : ControllerBase
     }
 
     private async Task WriteSseEventAsync(string eventName, IngestProgressEvent payload, CancellationToken ct)
+    {
+        var json = JsonSerializer.Serialize(payload);
+        await Response.WriteAsync($"event: {eventName}\n", ct);
+        await Response.WriteAsync($"data: {json}\n\n", ct);
+        await Response.Body.FlushAsync(ct);
+    }
+
+    private async Task WriteAskSseEventAsync<T>(string eventName, T payload, CancellationToken ct)
     {
         var json = JsonSerializer.Serialize(payload);
         await Response.WriteAsync($"event: {eventName}\n", ct);

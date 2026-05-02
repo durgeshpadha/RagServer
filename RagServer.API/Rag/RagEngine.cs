@@ -2,6 +2,7 @@ using System.Net.Http.Json;
 using Microsoft.Extensions.Options;
 using System.Text;
 using System.Text.Json;
+using System.Runtime.CompilerServices;
 
 public class RagEngine
 {
@@ -24,6 +25,21 @@ public class RagEngine
         IReadOnlyList<ChatTurn>? history = null,
         CancellationToken ct = default)
     {
+        var prepared = await PrepareWithKnowledgeBaseAsync(query, history, ct);
+        if (prepared.ShortCircuitResult is not null)
+        {
+            return prepared.ShortCircuitResult;
+        }
+
+        var answer = await GenerateAsync(prepared.Prompt, generationModel, ct);
+        return new AskResult(answer, prepared.Citations);
+    }
+
+    public async Task<AskPreparation> PrepareWithKnowledgeBaseAsync(
+        string query,
+        IReadOnlyList<ChatTurn>? history = null,
+        CancellationToken ct = default)
+    {
         var normalizedQuery = EmbeddingService.NormalizeForEmbedding(query);
         if (string.IsNullOrWhiteSpace(normalizedQuery))
         {
@@ -34,9 +50,12 @@ public class RagEngine
         var docs = _store.Query(queryEmbedding, _options.TopK);
         if (docs.Count == 0)
         {
-            return new AskResult(
+            return new AskPreparation(
+                Prompt: string.Empty,
+                Citations: Array.Empty<Citation>(),
+                ShortCircuitResult: new AskResult(
                 "I couldn't find relevant information in the knowledge base.",
-                Array.Empty<Citation>());
+                Array.Empty<Citation>()));
         }
 
         var context = BuildBoundedContext(docs, _options.MaxContextChars);
@@ -67,8 +86,7 @@ Answer:
             .Distinct()
             .ToArray();
 
-        var answer = await GenerateAsync(prompt, generationModel, ct);
-        return new AskResult(answer, citations);
+        return new AskPreparation(prompt, citations);
     }
 
     public async Task<AskResult> AskDirectAsync(
@@ -76,6 +94,15 @@ Answer:
         string generationModel,
         IReadOnlyList<ChatTurn>? history = null,
         CancellationToken ct = default)
+    {
+        var prepared = PrepareDirect(query, history);
+        var answer = await GenerateAsync(prepared.Prompt, generationModel, ct);
+        return new AskResult(answer, prepared.Citations);
+    }
+
+    public AskPreparation PrepareDirect(
+        string query,
+        IReadOnlyList<ChatTurn>? history = null)
     {
         if (string.IsNullOrWhiteSpace(query))
         {
@@ -95,8 +122,7 @@ Current Question: {query}
 Answer:
 ";
 
-        var answer = await GenerateAsync(prompt, generationModel, ct);
-        return new AskResult(answer, Array.Empty<Citation>());
+        return new AskPreparation(prompt, Array.Empty<Citation>());
     }
 
     private static string BuildBoundedContext(IReadOnlyList<DocumentRecord> docs, int maxContextChars)
@@ -147,6 +173,97 @@ Answer:
 
         return lines.Length == 0 ? "(none)" : string.Join('\n', lines);
     }
+
+    private sealed class StreamChunk
+    {
+        public string? Response { get; set; }
+        public bool Done { get; set; }
+        public string? Error { get; set; }
+    }
+
+    public async IAsyncEnumerable<string> StreamGenerateAsync(
+        string prompt,
+        string generationModel,
+        [EnumeratorCancellation] CancellationToken ct = default)
+    {
+        using var request = new HttpRequestMessage(HttpMethod.Post, $"{_options.OllamaBaseUrl.TrimEnd('/')}/api/generate")
+        {
+            Content = JsonContent.Create(new
+            {
+                model = generationModel,
+                prompt,
+                stream = true
+            })
+        };
+
+        HttpResponseMessage response;
+        try
+        {
+            response = await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct);
+        }
+        catch (TaskCanceledException ex) when (!ct.IsCancellationRequested)
+        {
+            throw new OllamaTimeoutException("Generation request timed out.", ex);
+        }
+        catch (HttpRequestException ex)
+        {
+            throw new OllamaRequestException("Generation service is unavailable.", ex);
+        }
+
+        if (!response.IsSuccessStatusCode)
+        {
+            throw new OllamaRequestException($"Generation API error {(int)response.StatusCode}.");
+        }
+
+        await using var stream = await response.Content.ReadAsStreamAsync(ct);
+        using var reader = new StreamReader(stream);
+
+        while (!ct.IsCancellationRequested)
+        {
+            var line = await reader.ReadLineAsync(ct);
+            if (line is null)
+            {
+                break;
+            }
+
+            if (string.IsNullOrWhiteSpace(line))
+            {
+                continue;
+            }
+
+            StreamChunk? chunk;
+            try
+            {
+                chunk = JsonSerializer.Deserialize<StreamChunk>(line, new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+            }
+            catch (JsonException ex)
+            {
+                throw new OllamaResponseException("Failed to parse generation stream response.", ex);
+            }
+
+            if (chunk is null)
+            {
+                continue;
+            }
+
+            if (!string.IsNullOrWhiteSpace(chunk.Error))
+            {
+                throw new OllamaResponseException(chunk.Error);
+            }
+
+            if (!string.IsNullOrWhiteSpace(chunk.Response))
+            {
+                yield return chunk.Response;
+            }
+
+            if (chunk.Done)
+            {
+                break;
+            }
+        }
+    }
+
+    public record AskPreparation(string Prompt, IReadOnlyList<Citation> Citations, AskResult? ShortCircuitResult = null);
 
     private async Task<string> GenerateAsync(string prompt, string generationModel, CancellationToken ct)
     {

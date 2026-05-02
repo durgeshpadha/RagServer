@@ -29,6 +29,10 @@ public record IngestProgressEvent(
     IngestResponse? Summary = null,
     string? ErrorMessage = null);
 
+public record AskStreamTokenEvent(string Text);
+public record AskStreamCompletedEvent(string Answer, IReadOnlyList<Citation> Citations);
+public record AskStreamErrorEvent(string Message, string? Code = null);
+
 public class RagOptions
 {
     public const string SectionName = "Rag";

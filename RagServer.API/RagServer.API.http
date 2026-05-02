@@ -32,6 +32,23 @@ Accept: application/json
 
 ###
 
+### Stream answer tokens + final citations (SSE)
+POST {{RagServer.Api_HostAddress}}/ask/stream
+Content-Type: application/json
+Accept: text/event-stream
+
+{
+  "query": "tell me about .NET 10",
+  "model": "qwen2.5-coder:14b",
+  "useKnowledgeBase": true,
+  "history": [
+    { "role": "user", "content": "do you know .NET 10?" },
+    { "role": "assistant", "content": "Yes, I do." }
+  ]
+}
+
+###
+
 ### Get configured chat models and default model
 GET {{RagServer.Api_HostAddress}}/models
 Accept: application/json

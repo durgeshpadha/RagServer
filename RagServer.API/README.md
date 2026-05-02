@@ -7,6 +7,7 @@ Minimal-dependency RAG API in C# using local files + Ollama.
 - `POST /ingest`: reads files from `Rag:KnowledgeBasePath`, chunks, embeds, and stores vectors.
 - `POST /ingest/stream`: streams ingest progress events (SSE) and final summary.
 - `POST /ask`: answers with or without retrieval depending on `useKnowledgeBase`.
+- `POST /ask/stream`: streams token chunks (SSE) and emits final answer + citations.
 - `GET /models`: returns configured chat models and default model.
 - `DELETE /data`: clears all indexed vector data.
 
@@ -42,8 +43,10 @@ Minimal-dependency RAG API in C# using local files + Ollama.
   - `503` service unavailable
   - `504` timeout
   - `502` invalid upstream response
+- `/ask/stream` emits SSE `error` events for generation failures after stream start.
 - Invalid model selection in `/ask` returns `400` with error code `invalid_model`.
 - `/ask` supports `useKnowledgeBase: false` for direct model answers (no citations).
+- `/ask` and `/ask/stream` support optional `history` for multi-turn context.
 - Absolute file paths are not returned in ingest failure payloads.
 
 ## Manual test flow
@@ -52,8 +55,9 @@ Minimal-dependency RAG API in C# using local files + Ollama.
 2. Run `GET /models`
 3. Run `POST /ask` with `useKnowledgeBase: true`
 4. Run `POST /ask` with `useKnowledgeBase: false`
-5. Run `POST /ask` with unsupported model (expect `400 invalid_model`)
-6. Run `DELETE /data`
-7. Run `POST /ask` again (RAG mode should report no relevant data)
+5. Run `POST /ask/stream` and verify token events + final completed event
+6. Run `POST /ask` with unsupported model (expect `400 invalid_model`)
+7. Run `DELETE /data`
+8. Run `POST /ask` again (RAG mode should report no relevant data)
 
 Use [RagServer.Api.http](./RagServer.Api.http) for ready-to-run requests.
