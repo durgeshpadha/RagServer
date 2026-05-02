@@ -70,6 +70,10 @@ Rules:
 - Do NOT make up information
 - Prefer concise, accurate answers
 - Quote relevant parts when useful
+- Format the answer using short paragraphs for readability
+- Use section headings only when they improve clarity for complex answers
+- If code is needed, use fenced code blocks with a language tag (for example ```csharp)
+- Avoid writing one long wall of text
 
 Conversation History:
 {historySection}
@@ -114,6 +118,10 @@ Answer:
         var prompt = $@"
 You are a concise and accurate assistant.
 Answer the user's question directly. If you are unsure, say so clearly.
+Use short paragraphs for readability.
+Use section headings only when they add clarity for complex answers.
+If code is included, format it in fenced code blocks with a language tag.
+Avoid one long wall of text.
 
 Conversation History:
 {historySection}
