@@ -83,6 +83,12 @@ public class RagController : ControllerBase
         }
     }
 
+    /// <summary>
+    /// Creates a new ingest operation and returns its operation identifier.
+    /// </summary>
+    /// <returns>Identifier for tracking or starting streamed ingest execution.</returns>
+    /// <response code="200">Ingest operation created successfully.</response>
+    /// <response code="409">Another ingest operation is already running.</response>
     [HttpPost("ingest/start")]
     public ActionResult<IngestStartResponse> IngestStart()
     {
@@ -94,6 +100,14 @@ public class RagController : ControllerBase
         return Ok(new IngestStartResponse(operation.OperationId));
     }
 
+    /// <summary>
+    /// Requests cancellation for an ingest operation.
+    /// </summary>
+    /// <param name="operationId">Ingest operation identifier.</param>
+    /// <returns>Current operation status after cancellation is requested.</returns>
+    /// <response code="200">Cancellation requested successfully.</response>
+    /// <response code="404">Operation was not found.</response>
+    /// <response code="409">Operation is no longer running and cannot be canceled.</response>
     [HttpPost("ingest/{operationId}/cancel")]
     public ActionResult<IngestCancelResponse> IngestCancel(string operationId)
     {
@@ -110,6 +124,15 @@ public class RagController : ControllerBase
         return Ok(new IngestCancelResponse(operation.OperationId, operation.Status.ToString().ToLowerInvariant(), "Cancellation requested."));
     }
 
+    /// <summary>
+    /// Streams server-sent ingest progress events for a specific operation.
+    /// </summary>
+    /// <param name="operationId">Ingest operation identifier.</param>
+    /// <param name="ct">Cancellation token for client disconnect or request cancellation.</param>
+    /// <returns>A <c>text/event-stream</c> response with progress, completion, or error events.</returns>
+    /// <response code="200">Progress stream established.</response>
+    /// <response code="404">Operation was not found.</response>
+    /// <response code="409">Operation cannot transition to running state.</response>
     [HttpGet("ingest/{operationId}/stream")]
     public async Task IngestOperationStream(string operationId, CancellationToken ct)
     {
@@ -196,6 +219,13 @@ public class RagController : ControllerBase
         }
     }
 
+    /// <summary>
+    /// Starts a new ingest operation and immediately streams progress events.
+    /// </summary>
+    /// <param name="ct">Cancellation token for client disconnect or request cancellation.</param>
+    /// <returns>A <c>text/event-stream</c> response for the newly created operation.</returns>
+    /// <response code="200">Progress stream established for the new operation.</response>
+    /// <response code="409">Another ingest operation is already running.</response>
     [HttpPost("ingest/stream")]
     public async Task IngestStream(CancellationToken ct)
     {
@@ -276,6 +306,14 @@ public class RagController : ControllerBase
         }
     }
 
+    /// <summary>
+    /// Streams token-by-token answer generation events for a user query.
+    /// </summary>
+    /// <param name="req">User query payload.</param>
+    /// <param name="ct">Cancellation token for stopping the request.</param>
+    /// <returns>A <c>text/event-stream</c> response with token, completed, or error events.</returns>
+    /// <response code="200">Answer stream established.</response>
+    /// <response code="400">Query payload is empty, exceeds limits, or model is invalid.</response>
     [HttpPost("ask/stream")]
     public async Task AskStream([FromBody] AskRequest req, CancellationToken ct)
     {
