@@ -13,6 +13,36 @@ Minimal-dependency RAG API in C# using local files + Ollama.
 - `POST /ask/stream`: streams token chunks (SSE) and emits final answer + citations.
 - `GET /models`: returns configured chat models and default model.
 - `DELETE /data`: clears all indexed vector data.
+- `GET /data/count`: returns total vector records currently stored.
+
+## Endpoint Usage In UI (`RagServer.Web`)
+
+### In use
+
+1. `POST /ask/stream`
+   - Used for chat response streaming.
+   - Emits `token`, `completed`, and `error` SSE events.
+2. `POST /ingest/start`
+   - Starts ingest and returns `operationId`.
+3. `GET /ingest/{operationId}/stream`
+   - Streams ingest progress for the started operation.
+4. `POST /ingest/{operationId}/cancel`
+   - Cancels active ingest when user clicks stop.
+5. `GET /models`
+   - Loads model list/default for UI selector.
+6. `GET /data/count`
+   - Fetches stored chunk count for dashboard.
+7. `DELETE /data`
+   - Clears stored vectors from UI action.
+
+### Not in use
+
+1. `POST /ingest`
+   - Full synchronous ingest endpoint (UI uses start+stream flow instead).
+2. `POST /ingest/stream`
+   - Combined start+stream endpoint (UI uses explicit two-step flow).
+3. `POST /ask`
+   - Non-streaming ask endpoint (UI uses streaming ask endpoint).
 
 ## Prerequisites
 
@@ -77,4 +107,4 @@ Recommended starting values for laptops: `IngestMaxParallelFiles = 2`, `IngestMa
 7. Run `DELETE /data`
 8. Run `POST /ask` again (RAG mode should report no relevant data)
 
-Use [RagServer.Api.http](./RagServer.Api.http) for ready-to-run requests.
+Use [RagServer.API.http](./RagServer.API.http) for ready-to-run requests.
